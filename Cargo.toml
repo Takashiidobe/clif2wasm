@@ -1,0 +1,25 @@
+[package]
+name = "clif2wasm"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+test = false
+doctest = false
+
+[features]
+module-seam = ["dep:cranelift-module", "cranelift-codegen/pulley"]
+
+[dependencies]
+cranelift-codegen = { version = "0.136.0", default-features = false, features = [
+  "std",
+] }
+cranelift-frontend = "0.136.0"
+cranelift-module = { version = "0.136.0", optional = true }
+target-lexicon = "0.13"
+waffle = "0.3.2"
+anyhow = "1.0"
+wasmparser = "0.261"
+
+wasm-encoder = { version = "0.261", features = ["wasmparser"] }
