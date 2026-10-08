@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "clif2wasm",
+  "project_id": "20093d87-aaa0-4079-95cc-d053dc4e5b86"
+}
