@@ -1,0 +1,7 @@
+; run: %sum(0x1.4, 0x2.8) == 0x3.c
+; run: %sum(0x1.0, 0x2.0) == 0x3.0
+function %sum(f64, f64) -> f64 {
+block0(v0: f64, v1: f64):
+    v2 = fadd v0, v1
+    return v2
+}

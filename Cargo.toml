@@ -23,3 +23,8 @@ anyhow = "1.0"
 wasmparser = "0.261"
 
 wasm-encoder = { version = "0.261", features = ["wasmparser"] }
+
+[dev-dependencies]
+cranelift-interpreter = "0.136.0"
+cranelift-reader = "0.136.0"
+wasmi = "2.0.0"

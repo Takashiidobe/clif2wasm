@@ -1,0 +1,7 @@
+; run: %add(7, 3) == 10
+; run: %add(-2147483648, -1) == 2147483647
+function %add(i32, i32) -> i32 {
+block0(v0: i32, v1: i32):
+    v2 = iadd v0, v1
+    return v2
+}
