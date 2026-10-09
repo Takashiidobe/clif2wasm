@@ -639,7 +639,7 @@ pub(crate) fn signature_data(sig: &ir::Signature) -> Result<SignatureData> {
             }
             other => unsupported!("unsupported ArgumentPurpose {other:?}"),
         }
-        Ok(expand_type(p.value_type)?)
+        expand_type(p.value_type)
     };
     let mut params = Vec::new();
     for p in &sig.params {

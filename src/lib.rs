@@ -175,10 +175,10 @@ pub fn expand_type(ty: ir::Type) -> ClifResult<Vec<waffle::Type>> {
     if ty == cranelift_codegen::ir::types::I128 {
         Ok(vec![waffle::Type::I64, waffle::Type::I64])
     } else if ty.is_dynamic_vector() {
-        return Err(Error::unsupported_with_code(
+        Err(Error::unsupported_with_code(
             ErrorCode::UnsupportedRepresentation,
             format!("clif2wasm: dynamic CLIF vector type {ty} is unsupported"),
-        ));
+        ))
     } else if ty.is_vector() {
         let chunks = ty.bits().div_ceil(128) as usize;
         Ok(vec![waffle::Type::V128; chunks])
@@ -186,4 +186,3 @@ pub fn expand_type(ty: ir::Type) -> ClifResult<Vec<waffle::Type>> {
         Ok(vec![map_type(ty)?])
     }
 }
-

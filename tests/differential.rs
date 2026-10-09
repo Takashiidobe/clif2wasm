@@ -97,7 +97,7 @@ fn run_fixture(path: &Path) {
                 );
             };
             assert!(
-                span.len() > 0,
+                !span.is_empty(),
                 "{}: diagnostic span is empty",
                 path.display()
             );

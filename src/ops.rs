@@ -845,10 +845,10 @@ pub fn lower_inst(
             cx.bind1(dfg.first_result(inst), wv);
         }
 
-        InstructionData::Ternary { opcode, args }
-            if opcode == Opcode::StackSwitch =>
-        {
-            let _ = args;
+        InstructionData::Ternary {
+            opcode: Opcode::StackSwitch,
+            ..
+        } => {
             unsupported!(
                 "stack_switch is unsupported: wasm stack switching requires a stack-context ABI and runtime support, neither of which this module provides"
             );
@@ -1545,7 +1545,7 @@ fn lower_scalar_integer_special(
     );
     let wty = map_type(ty)?;
     let narrow = matches!(ty, types::I8 | types::I16);
-    let bits = ty.bits() as u32;
+    let bits = ty.bits();
     let mut a = cx.one(args[0])?;
     let mut b = cx.one(args[1])?;
     if narrow {
@@ -2364,7 +2364,7 @@ fn lower_vector_mulhi(
                 let shift = body.add_op(
                     wb,
                     Operator::I32Const {
-                        value: lane_ty.bits() as u32,
+                        value: lane_ty.bits(),
                     },
                     &[],
                     &[Type::I32],
@@ -2448,7 +2448,7 @@ fn lower_vector_shift(
     let lanes_per_chunk = 128 / lane_ty.bits() as usize;
     let chunks = ty.bits().div_ceil(128) as usize;
     let scalar_ty = map_type(lane_ty)?;
-    let width = lane_ty.bits() as u32;
+    let width = lane_ty.bits();
     let mut output = (0..chunks)
         .map(|_| body.add_op(wb, Operator::V128Const { value: 0 }, &[], &[Type::V128]))
         .collect::<Vec<_>>();
@@ -2540,7 +2540,7 @@ fn lower_iadd_pairwise(
     let rhs = cx.vector(args[1])?;
     let lane_count = ty.lane_count() as usize;
     ensure!(
-        lane_count % 2 == 0,
+        lane_count.is_multiple_of(2),
         "iadd_pairwise requires an even lane count"
     );
     let lanes_per_chunk = 128 / lane_ty.bits() as usize;
@@ -3916,7 +3916,7 @@ fn lower_addr(cx: &FnCx, addr: ir::Value) -> Result<waffle::Value> {
         ty == types::I32,
         "address has CLIF type {ty}, expected i32 — was this CLIF built for a 64-bit pointer target?"
     );
-    Ok(cx.one(addr)?)
+    cx.one(addr)
 }
 
 fn validate_memory_flags(cx: &FnCx, flags: ir::MemFlags, operation: &str) -> Result<()> {
@@ -3973,7 +3973,10 @@ fn atomic_mem_arg(cx: &FnCx, ty: types::Type) -> Result<MemoryArg> {
 /// { namespace: 0, index: k }` where `k` is the callee's ordinal in the input slice,
 /// or an `ExternalName::LibCall` routed to a synthesized runtime helper (which has no
 /// ordinal — its address cannot be taken).
-pub(crate) fn resolve_callee(cx: &FnCx, func_ref: ir::FuncRef) -> Result<(Option<u32>, waffle::Func)> {
+pub(crate) fn resolve_callee(
+    cx: &FnCx,
+    func_ref: ir::FuncRef,
+) -> Result<(Option<u32>, waffle::Func)> {
     let ext = &cx.clif.dfg.ext_funcs[func_ref];
     let name_ref = match ext.name {
         ir::ExternalName::User(r) => r,

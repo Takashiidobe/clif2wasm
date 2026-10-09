@@ -24,3 +24,6 @@ cranelift-interpreter = "0.136.0"
 cranelift-reader = "0.136.0"
 getrandom = "0.4.3"
 wasmi = { version = "2.0.0", features = ["simd"] }
+
+[lints.clippy]
+result_large_err = "allow"

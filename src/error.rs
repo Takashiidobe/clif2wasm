@@ -100,7 +100,7 @@ impl Error {
     pub fn at_instruction(self, function: &str, instruction: &str) -> Self {
         let rendered = format!("{function}:\n  {instruction}");
         let span = Some((rendered.len() - instruction.len(), instruction.len()).into());
-        let source_code = Some(NamedSource::new(function.to_owned(), rendered));
+        let source_code = Some(NamedSource::new(function, rendered));
         match self {
             Self::Internal {
                 code,
@@ -286,7 +286,7 @@ impl Diagnostic for Error {
         span.map(|span| {
             Box::new(std::iter::once(LabeledSpan::new_primary_with_span(
                 Some(label.to_owned()),
-                span.clone(),
+                *span,
             ))) as Box<dyn Iterator<Item = LabeledSpan>>
         })
     }
