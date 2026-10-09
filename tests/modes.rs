@@ -1,0 +1,296 @@
+//! Characterization tests for the module-assembly modes behind `WasmModule`:
+//! static data with relocations, function pointers in data, libcalls, host imports,
+//! undefined-symbol policy, and incremental ("session") emission.
+
+use clif2wasm::WasmModule;
+use cranelift_codegen::Context;
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module as _};
+use cranelift_reader::parse_functions;
+use wasmi::{Engine, Linker, Module, Store};
+
+fn declare(module: &mut WasmModule, name: &str, linkage: Linkage, source: &str) -> FuncId {
+    let function = parse_functions(source).unwrap().remove(0);
+    module
+        .declare_function(name, linkage, &function.signature)
+        .unwrap()
+}
+
+fn define(module: &mut WasmModule, id: FuncId, source: &str) {
+    let function = parse_functions(source).unwrap().remove(0);
+    module
+        .define_function(id, &mut Context::for_function(function))
+        .unwrap();
+}
+
+fn run_i32(bytes: &[u8], export: &str, arg: i32) -> i32 {
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).unwrap();
+    let mut store = Store::new(&engine, ());
+    let mut linker = Linker::new(&engine);
+    linker
+        .func_wrap("env", "host_add", |a: i32, b: i32| a + b + 1000)
+        .unwrap();
+    let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
+    let func = instance.get_func(&store, export).unwrap();
+    let mut results = [wasmi::Val::I32(0)];
+    func.call(&mut store, &[wasmi::Val::I32(arg)], &mut results)
+        .unwrap();
+    let wasmi::Val::I32(value) = results[0] else {
+        panic!("non-i32 result")
+    };
+    value
+}
+
+#[test]
+fn data_relocations_and_function_pointers() {
+    let mut module = WasmModule::new().unwrap();
+    let add1_src = "function %add1(i32) -> i32 {\nblock0(v0: i32):\n    v2 = iconst.i32 1\n    v1 = iadd v0, v2\n    return v1\n}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = (i32) -> i32
+    gv0 = symbol colocated u1:0
+    gv1 = symbol colocated u1:1
+block0(v0: i32):
+    v1 = symbol_value.i32 gv0
+    v2 = load.i32 v1
+    v3 = call_indirect sig0, v2(v0)
+    v4 = load.i32 v1+4
+    v5 = load.i32 v4
+    v6 = iadd v3, v5
+    v7 = symbol_value.i32 gv1
+    v8 = load.i32 v7+4
+    v9 = iadd v6, v8
+    return v9
+}";
+    let add1 = declare(&mut module, "add1", Linkage::Local, add1_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    let table = module
+        .declare_data("table", Linkage::Local, false, false)
+        .unwrap();
+    let value = module
+        .declare_data("value", Linkage::Local, false, false)
+        .unwrap();
+    define(&mut module, add1, add1_src);
+    define(&mut module, main, main_src);
+
+    let mut table_desc = DataDescription::new();
+    table_desc.define(vec![0u8; 8].into_boxed_slice());
+    table_desc.set_align(4);
+    let func_ref = module.declare_func_in_data(add1, &mut table_desc);
+    table_desc.write_function_addr(0, func_ref);
+    let value_gv = module.declare_data_in_data(value, &mut table_desc);
+    table_desc.write_data_addr(4, value_gv, 0);
+    module.define_data(table, &table_desc).unwrap();
+
+    let mut value_desc = DataDescription::new();
+    value_desc.define([5u32, 700].iter().flat_map(|v| v.to_le_bytes()).collect());
+    value_desc.set_align(4);
+    module.define_data(value, &value_desc).unwrap();
+
+    let _: (DataId, DataId) = (table, value);
+    let bytes = module.finish().unwrap();
+    // main(10) = add1(10) + *value + value[1] = 11 + 5 + 700
+    assert_eq!(run_i32(&bytes, "main", 10), 716);
+}
+
+#[test]
+fn libcalls_are_synthesized() {
+    let mut module = WasmModule::new().unwrap();
+    let main_src = "function %main(i32) -> i32 {
+    ss0 = explicit_slot 32
+    sig0 = (i32, i32, i32) -> i32
+    fn0 = %Memset sig0
+    fn1 = %Memcpy sig0
+    fn2 = %Memmove sig0
+    fn3 = %Memcmp sig0
+block0(v0: i32):
+    v1 = stack_addr.i32 ss0
+    v2 = stack_addr.i32 ss0+16
+    v3 = iconst.i32 0x41
+    v4 = iconst.i32 8
+    v5 = call fn0(v1, v3, v4)
+    v6 = call fn1(v2, v1, v4)
+    v7 = call fn3(v1, v2, v4)
+    v8 = iconst.i32 0x04030201
+    store v8, v1
+    v14 = iconst.i32 1
+    v9 = iadd v1, v14
+    v10 = iconst.i32 3
+    v11 = call fn2(v9, v1, v10)
+    v12 = load.i32 v1
+    v13 = iadd v12, v7
+    return v13
+}";
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    // memmove(a+1, a, 3) over 01 02 03 04 gives 01 01 02 03
+    assert_eq!(run_i32(&bytes, "main", 0), 0x0302_0101);
+}
+
+#[test]
+fn host_imports_and_panic_stubs() {
+    let mut module = WasmModule::new().unwrap();
+    module.allow_import("host_add");
+    let host_src =
+        "function %host_add(i32, i32) -> i32 {\nblock0(v0: i32, v1: i32):\n    return v0\n}";
+    let panic_src = "function %core_panic() {\nblock0:\n    return\n}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = (i32, i32) -> i32
+    sig1 = ()
+    fn0 = colocated u0:0 sig0
+    fn1 = colocated u0:1 sig1
+block0(v0: i32):
+    v1 = iconst.i32 0
+    brif v0, block1, block2
+block1:
+    v2 = call fn0(v0, v0)
+    return v2
+block2:
+    call fn1()
+    return v1
+}";
+    declare(&mut module, "host_add", Linkage::Import, host_src);
+    declare(&mut module, "core_panic", Linkage::Import, panic_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 7), 7 + 7 + 1000);
+}
+
+#[test]
+fn undefined_non_panic_symbol_is_rejected() {
+    let mut module = WasmModule::new().unwrap();
+    let missing_src = "function %missing() {\nblock0:\n    return\n}";
+    let main_src = "function %main() {
+    sig0 = ()
+    fn0 = colocated u0:0 sig0
+block0:
+    call fn0()
+    return
+}";
+    declare(&mut module, "missing", Linkage::Import, missing_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, main, main_src);
+    let error = module.finish().unwrap_err();
+    assert!(format!("{error:#}").contains("missing"), "{error:#}");
+}
+
+#[test]
+fn stack_overflow_traps() {
+    let mut module = WasmModule::new().unwrap();
+    let main_src = "function %main(i32) -> i32 {
+    ss0 = explicit_slot 4096
+    sig0 = (i32) -> i32
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    v1 = stack_addr.i32 ss0
+    store v0, v1
+    v2 = call fn0(v0)
+    return v2
+}";
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes[..]).unwrap();
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::<()>::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let func = instance.get_func(&store, "main").unwrap();
+    let mut results = [wasmi::Val::I32(0)];
+    assert!(
+        func.call(&mut store, &[wasmi::Val::I32(1)], &mut results)
+            .is_err()
+    );
+}
+
+#[test]
+fn incremental_emission_links_sessions_through_the_host() {
+    let mut module = WasmModule::new().unwrap();
+    let first_src = "function %first(i32) -> i32 {
+    gv0 = symbol colocated u1:0
+block0(v0: i32):
+    v1 = symbol_value.i32 gv0
+    v2 = load.i32 v1
+    v3 = iadd v0, v2
+    return v3
+}";
+    let second_src = "function %second(i32) -> i32 {
+    sig0 = (i32) -> i32
+    fn0 = colocated u0:0 sig0
+    gv0 = symbol colocated u1:1
+block0(v0: i32):
+    v1 = call fn0(v0)
+    v2 = symbol_value.i32 gv0
+    v3 = load.i32 v2
+    v4 = iadd v1, v3
+    return v4
+}";
+    let first = declare(&mut module, "first", Linkage::Export, first_src);
+    let one = module
+        .declare_data("one", Linkage::Local, false, false)
+        .unwrap();
+    define(&mut module, first, first_src);
+    let mut desc = DataDescription::new();
+    desc.define(30u32.to_le_bytes().to_vec().into_boxed_slice());
+    desc.set_align(4);
+    module.define_data(one, &desc).unwrap();
+
+    let mut next_address = 0x2000u32;
+    let mut allocate = |size: usize, align: u32| {
+        next_address = (next_address + align - 1) & !(align - 1);
+        let address = next_address;
+        next_address += size as u32;
+        Ok(address)
+    };
+    let first_bytes = module.emit_incremental(&mut allocate).unwrap();
+
+    let second = declare(&mut module, "second", Linkage::Export, second_src);
+    let two = module
+        .declare_data("two", Linkage::Local, false, false)
+        .unwrap();
+    define(&mut module, second, second_src);
+    let mut desc = DataDescription::new();
+    desc.define(400u32.to_le_bytes().to_vec().into_boxed_slice());
+    desc.set_align(4);
+    module.define_data(two, &desc).unwrap();
+    let second_bytes = module.emit_incremental(&mut allocate).unwrap();
+
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+    let memory = wasmi::Memory::new(&mut store, wasmi::MemoryType::new(1, None)).unwrap();
+    let table = wasmi::Table::new(
+        &mut store,
+        wasmi::TableType::new(wasmi::RefType::Func, 8, None),
+        wasmi::Ref::Func(wasmi::Nullable::Null),
+    )
+    .unwrap();
+    let stack_pointer =
+        wasmi::Global::new(&mut store, wasmi::Val::I32(0x1000), wasmi::Mutability::Var);
+    let mut linker = Linker::new(&engine);
+    linker.define("env", "memory", memory).unwrap();
+    linker.define("env", "table", table).unwrap();
+    linker
+        .define("env", "stack_pointer", stack_pointer)
+        .unwrap();
+
+    let first_module = Module::new(&engine, &first_bytes[..]).unwrap();
+    let first_instance = linker
+        .instantiate_and_start(&mut store, &first_module)
+        .unwrap();
+    let first_func = first_instance.get_func(&store, "first").unwrap();
+    linker.define("env", "first", first_func).unwrap();
+
+    let second_module = Module::new(&engine, &second_bytes[..]).unwrap();
+    let second_instance = linker
+        .instantiate_and_start(&mut store, &second_module)
+        .unwrap();
+    let second_func = second_instance.get_func(&store, "second").unwrap();
+    let mut results = [wasmi::Val::I32(0)];
+    second_func
+        .call(&mut store, &[wasmi::Val::I32(5)], &mut results)
+        .unwrap();
+    // second(5) = first(5) + 400 = (5 + 30) + 400
+    assert!(matches!(results[0], wasmi::Val::I32(435)));
+}
