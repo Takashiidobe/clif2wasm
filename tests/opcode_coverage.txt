@@ -1,0 +1,165 @@
+# every cranelift Opcode::all() member with a status: lowered | erased | partial | unsupported
+# format: opcode status [note]; partial and unsupported need a note
+atomic_cas partial requires TranslationOptions::shared_memory_max_pages
+atomic_load partial requires TranslationOptions::shared_memory_max_pages
+atomic_rmw partial requires TranslationOptions::shared_memory_max_pages
+atomic_store partial requires TranslationOptions::shared_memory_max_pages
+avg_round lowered
+band lowered
+bitcast lowered
+bitrev lowered
+bitselect lowered
+blendv lowered
+bmask unsupported aaw.17
+bnot lowered
+bor lowered
+br_table lowered
+brif lowered
+bswap lowered
+bxor lowered
+call lowered
+call_indirect lowered
+ceil lowered
+cls unsupported aaw.17
+clz lowered
+ctz lowered
+debugtrap erased no-op; no debugger observes it (docs/machine-state.md)
+dynamic_stack_addr unsupported dynamic vectors are unsupported (docs/simd.md)
+extract_vector unsupported dynamic vector type required (docs/simd.md)
+extractlane lowered
+f128const unsupported f128 type unsupported (aaw.29)
+f16const unsupported f16 type unsupported (aaw.29)
+f32const lowered
+f64const lowered
+fabs lowered
+fadd lowered
+fcmp lowered
+fcopysign lowered
+fcvt_from_sint lowered
+fcvt_from_uint lowered
+fcvt_to_sint lowered
+fcvt_to_sint_sat lowered
+fcvt_to_uint lowered
+fcvt_to_uint_sat lowered
+fdemote lowered
+fdiv lowered
+fence partial requires TranslationOptions::shared_memory_max_pages
+floor lowered
+fma unsupported aaw.18
+fmax lowered
+fmin lowered
+fmul lowered
+fneg lowered
+fpromote lowered
+fsub lowered
+func_addr lowered
+fvdemote unsupported aaw.33
+fvpromote_low unsupported aaw.33
+get_exception_handler_address unsupported not observable in wasm (docs/machine-state.md)
+get_frame_pointer unsupported no frame-pointer chain (docs/machine-state.md)
+get_pinned_reg unsupported no slot for a pinned-register global (docs/machine-state.md)
+get_return_address unsupported not observable in wasm (docs/machine-state.md)
+get_stack_pointer lowered
+iabs lowered
+iadd lowered
+iadd_pairwise lowered
+icmp lowered
+iconcat lowered
+iconst lowered
+imul lowered
+ineg lowered
+insertlane lowered
+ireduce lowered
+ishl lowered
+isplit lowered
+istore16 lowered
+istore32 lowered
+istore8 lowered
+isub lowered
+jump lowered
+load lowered
+nearest lowered
+nop erased no wasm counterpart needed
+popcnt lowered
+return lowered
+return_call lowered
+return_call_indirect lowered
+rotl lowered
+rotr lowered
+sadd_overflow lowered
+sadd_overflow_cin lowered
+sadd_sat lowered
+scalar_to_vector lowered
+sdiv lowered
+select lowered
+select_spectre_guard lowered
+sequence_point unsupported aaw.19
+set_pinned_reg unsupported no slot for a pinned-register global (docs/machine-state.md)
+sextend lowered
+shuffle lowered
+sload16 lowered
+sload16x4 lowered
+sload32 lowered
+sload32x2 lowered
+sload8 lowered
+sload8x8 lowered
+smax lowered
+smin lowered
+smul_overflow unsupported aaw.16
+smulhi lowered
+snarrow unsupported aaw.33
+splat lowered
+sqmul_round_sat lowered
+sqrt lowered
+srem lowered
+sshr lowered
+ssub_overflow lowered
+ssub_overflow_bin lowered
+ssub_sat lowered
+stack_addr lowered
+stack_switch unsupported needs stack-switching operators (aaw.32)
+store lowered
+swiden_high unsupported aaw.33
+swiden_low unsupported aaw.33
+swizzle lowered
+symbol_value lowered
+tls_value unsupported thread-local storage boundary (docs/global-values.md)
+trap lowered
+trapnz lowered
+trapz lowered
+trunc lowered
+try_call partial handler-less exception tables only (docs/exceptions.md, aaw.31)
+try_call_indirect partial handler-less exception tables only (docs/exceptions.md, aaw.31)
+uadd_overflow lowered
+uadd_overflow_cin lowered
+uadd_overflow_trap unsupported aaw.16
+uadd_sat lowered
+udiv lowered
+uextend lowered
+uload16 lowered
+uload16x4 lowered
+uload32 lowered
+uload32x2 lowered
+uload8 lowered
+uload8x8 lowered
+umax lowered
+umin lowered
+umul_overflow unsupported aaw.16
+umulhi lowered
+unarrow unsupported aaw.33
+urem lowered
+ushr lowered
+usub_overflow lowered
+usub_overflow_bin lowered
+usub_sat lowered
+uunarrow unsupported aaw.33
+uwiden_high unsupported aaw.33
+uwiden_low unsupported aaw.33
+vall_true lowered
+vany_true lowered
+vconst lowered
+vhigh_bits lowered
+x86_cvtt2dq lowered
+x86_pmaddubsw lowered
+x86_pmulhrsw lowered
+x86_pshufb lowered
