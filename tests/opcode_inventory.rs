@@ -75,3 +75,21 @@ fn immediate_and_complement_forms_are_not_exposed() {
         "Cranelift now exposes immediate/complement forms; lower them and update docs/opcode-coverage.md: {exposed:?}"
     );
 }
+
+#[test]
+fn explicit_stack_load_store_are_not_exposed() {
+    let exposed: Vec<String> = Opcode::all()
+        .iter()
+        .map(|op| op.to_string())
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "stack_load" | "stack_store" | "dynamic_stack_load" | "dynamic_stack_store"
+            )
+        })
+        .collect();
+    assert!(
+        exposed.is_empty(),
+        "Cranelift now exposes explicit stack accesses; lower them and update docs/stack-operations.md: {exposed:?}"
+    );
+}

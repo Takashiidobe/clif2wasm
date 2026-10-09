@@ -15,3 +15,10 @@ missing capability.
 - `stack_switch`: the ABI has no context records or switching runtime, and
   Waffle has no stack-switching operators. Lowering it to a branch or call would
   lose suspend/resume semantics.
+
+## Explicit stack load/store
+
+`stack_load`, `stack_store`, `dynamic_stack_load` and `dynamic_stack_store` are not in
+the pinned Cranelift's `Opcode::all()`; stack slots are accessed through `stack_addr`
+plus an ordinary `load`/`store`. `explicit_stack_load_store_are_not_exposed` in
+`tests/opcode_inventory.rs` fails if an upgrade adds any of them.
