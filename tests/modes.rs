@@ -447,7 +447,6 @@ block1(v2: i32):
 }
 
 #[test]
-#[ignore = "portal-pc-waffle 0.5.5 stores multi-output operator results in reverse order"]
 fn multi_value_call_results_keep_their_order() {
     let mut module = WasmModule::new().unwrap();
     let pair_src = "function %pair(i32) -> i32, i8 {

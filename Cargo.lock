@@ -566,8 +566,6 @@ checksum = "c2a69ee997a6282f8462abf1e0d8c38c965e968799e912b3bed8c9e8a28c2f9f"
 [[package]]
 name = "portal-pc-waffle"
 version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "129eccbc902d2aa4892f85d7baa00980ed15215f9bcedbb13fb4564e13c34833"
 dependencies = [
  "anyhow",
  "arena-traits",

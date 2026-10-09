@@ -13,7 +13,7 @@ cranelift-codegen = { version = "0.136.0", default-features = false, features = 
 cranelift-frontend = "0.136.0"
 cranelift-module = "0.136.0"
 target-lexicon = "0.13"
-waffle = { package = "portal-pc-waffle", version = "0.5.5" }
+waffle = { package = "portal-pc-waffle", path = "vendor/waffle" }
 wasmparser = "0.261"
 
 thiserror = "2"

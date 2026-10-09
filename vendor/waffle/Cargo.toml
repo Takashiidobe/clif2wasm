@@ -1,0 +1,65 @@
+[package]
+name = "portal-pc-waffle"
+version = "0.5.5"
+description = "Wasm Analysis Framework For Lightweight Experiments"
+authors = ["Chris Fallin <chris@cfallin.org>","gkgoat"]
+license = "Apache-2.0 WITH LLVM-exception"
+edition = "2018"
+
+[dependencies]
+wasmparser = { version = "0.227", default-features = false, features = ["simd"] }
+wasm-encoder = { version = "0.227", default-features = false }
+anyhow = { version = "^1.0", default-features = false }
+# structopt = "0.3"
+log = { version = "0.4", default-features = false }
+# env_logger = "0.11"
+
+smallvec = { version = "1.13", default-features = false }
+# rayon = "1.10"
+# lazy_static = "1.4"
+# libc = "0.2"
+# addr2line = "0.21"
+
+# For fuzzing only. Versions must match those in fuzz/Cargo.toml.
+libfuzzer-sys = { version = "0.4", optional = true }
+indexmap = { version = "2.2.2", default-features = false }
+stacker = { version = "0.1.15", optional = true }
+wasm-smith = { version = "0.202", optional = true }
+paste = "1.0.15"
+serde = { version = "1.0.204", features = ["derive"] }
+
+
+either = { version = "1.13.0", features = ["serde"], default-features = false }
+arena-traits = "^0.2.3"
+ssa-traits = {version="0.2.3",optional=true}
+cfg-traits = {version="0.2.3",optional=true}
+
+cfg-traits-03 = {version="0.3.0-alpha.2",package="cfg-traits",optional=true}
+ssa-traits-03 = {version="0.3.0-alpha.2",package="ssa-traits",optional=true}
+lending-iterator = "0.1.7"
+hashbrown = { version = "0.15.2", default-features = false, features = ["alloc", "default-hasher", "equivalent", "serde"] }
+impl-trait-for-tuples = "0.2.3"
+sha3 = { version = "0.10.8", default-features = false }
+
+[dev-dependencies]
+wat = "1.212.0"
+env_logger = "0.11"
+structopt = "0.3.26"
+
+[features]
+default = []
+fuzzing = ["libfuzzer-sys", "wasm-smith"]
+stacker = ["dep:stacker"]
+ssa-traits-02 = ["dep:ssa-traits","dep:cfg-traits"]
+ssa-traits-03 = ["dep:ssa-traits-03","dep:cfg-traits-03"]
+copying=[]
+tcore=[]
+exceptions=[]
+hooking=[]
+importify=[]
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
