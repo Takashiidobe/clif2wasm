@@ -153,7 +153,7 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
 }
 
 fn write_object(rel: &Relocatable) -> Result<Vec<u8>> {
-    let funcs = rel.funcs;
+    let funcs = &rel.funcs[..];
     let data = rel.data;
     let mut w = ObjWriter::new();
 

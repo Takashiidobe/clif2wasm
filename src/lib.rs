@@ -15,6 +15,7 @@ pub use module_impl::WasmModule;
 pub mod object;
 pub mod ops;
 mod relocatable;
+pub mod runtime_fma;
 pub mod runtime_i128;
 
 use crate::error::{Error, ErrorCode, Result as ClifResult};
@@ -67,6 +68,10 @@ pub enum RuntimeFn {
     U128Mulo,
     /// Signed variant of the above.
     I128Mulo,
+    /// `(f32, f32, f32) -> f32` fused `a*b + c` with a single rounding.
+    FmaF32,
+    /// `(f64, f64, f64) -> f64` fused `a*b + c` with a single rounding.
+    FmaF64,
     /// `(mem: i32, delta_pages: i32) -> prev_pages` — wasm `memory.grow` (the
     /// fork reroutes `llvm.wasm.memory.grow.i32` here; std's dlmalloc bottoms
     /// out in it).
@@ -89,6 +94,8 @@ impl RuntimeFn {
             "__modti3" => RuntimeFn::Modti3,
             "__rust_u128_mulo" => RuntimeFn::U128Mulo,
             "__rust_i128_mulo" => RuntimeFn::I128Mulo,
+            "__clif2wasm_fma_f32" => RuntimeFn::FmaF32,
+            "__clif2wasm_fma_f64" => RuntimeFn::FmaF64,
             "__clif2wasm_memory_grow" => RuntimeFn::MemoryGrow,
             "__clif2wasm_memory_size" => RuntimeFn::MemorySize,
             _ => return None,

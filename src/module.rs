@@ -89,13 +89,15 @@ pub(crate) fn synth_runtime_body(
             let values = if returns_ptr { vec![a] } else { vec![] };
             body.set_terminator(entry, Terminator::Return { values });
         }
-        // i128 runtime fns are CLIF-synthesized in runtime_i128 and never reach here.
+        // i128 and fma runtime fns are CLIF-synthesized in runtime_i128/runtime_fma and never reach here.
         RuntimeFn::Udivti3
         | RuntimeFn::Divti3
         | RuntimeFn::Umodti3
         | RuntimeFn::Modti3
         | RuntimeFn::U128Mulo
-        | RuntimeFn::I128Mulo => {
+        | RuntimeFn::I128Mulo
+        | RuntimeFn::FmaF32
+        | RuntimeFn::FmaF64 => {
             unsupported!("{kind:?} is CLIF-synthesized, not waffle-synthesized")
         }
         // Handled by the early returns above.

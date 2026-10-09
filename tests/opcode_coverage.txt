@@ -45,7 +45,7 @@ fdemote lowered
 fdiv lowered
 fence partial requires TranslationOptions::shared_memory_max_pages
 floor lowered
-fma unsupported aaw.18
+fma partial scalar f32 and f64 only; vectors unsupported
 fmax lowered
 fmin lowered
 fmul lowered

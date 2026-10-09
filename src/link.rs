@@ -91,7 +91,7 @@ fn apply_relocs(
 }
 
 pub(crate) fn link(rel: &Relocatable, opts: &LinkOptions) -> Result<Vec<u8>> {
-    let funcs = rel.funcs;
+    let funcs = &rel.funcs[..];
     let session = opts.session.as_ref();
     ensure!(
         session.is_none_or(|l| l.data_addresses.len() == rel.data.len()),

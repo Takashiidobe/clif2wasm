@@ -46,6 +46,9 @@ pub struct ModCtx<'a> {
     pub table: waffle::Table,
     /// Synthesized runtime helpers for `ExternalName::LibCall` callees.
     pub libcalls: &'a HashMap<crate::RuntimeFn, waffle::Func>,
+    /// Weak runtime helpers defined in this module that lowerings call directly
+    /// (scalar `fma`).
+    pub helpers: &'a HashMap<crate::RuntimeFn, waffle::Func>,
     /// Symbol references lower to `global.get <marker>`; the splicer rewrites each
     /// marker site into a padded `i32.const` + relocation resolved by the linker.
     pub object_markers: &'a ObjectMarkers,

@@ -36,6 +36,7 @@ pub enum ObjBinding {
 
 /// A function definition: translated CLIF, or a synthesized runtime body
 /// (i128 helpers via CLIF synthesis, memory.grow/size directly in waffle IR).
+#[derive(Clone, Copy)]
 pub enum ObjDef<'a> {
     Clif(&'a ir::Function),
     Runtime(crate::RuntimeFn),
@@ -43,6 +44,7 @@ pub enum ObjDef<'a> {
 
 /// One function slot, in FuncId order. `def: None` = undefined: it becomes a
 /// function import from `env` plus an undefined symbol for the linker to resolve.
+#[derive(Clone)]
 pub struct ObjFunc<'a> {
     pub name: &'a str,
     pub binding: ObjBinding,
@@ -162,7 +164,7 @@ pub(crate) struct Body {
 }
 
 pub(crate) struct Relocatable<'a> {
-    pub funcs: &'a [ObjFunc<'a>],
+    pub funcs: Vec<ObjFunc<'a>>,
     pub data: &'a [ObjData<'a>],
     pub signatures: Vec<SignatureData>,
     pub func_sigs: Vec<u32>,
@@ -246,7 +248,9 @@ fn translate_body(
                 .with_context(|| format!("translating function `{}`", f.name))?
         }
         &ObjDef::Runtime(kind) => {
-            if let Some(clif_fn) = crate::runtime_i128::build(kind) {
+            if let Some(clif_fn) =
+                crate::runtime_i128::build(kind).or_else(|| crate::runtime_fma::build(kind))
+            {
                 bridge::translate_function(&clif_fn, module, sigs[k], mctx, &HashMap::new())
                     .with_context(|| format!("translating runtime `{}`", f.name))?
             } else {
@@ -262,11 +266,53 @@ fn translate_body(
 }
 
 /// Translate CLIF functions + data into the relocatable form.
+/// Appends the weak hidden `fma` helpers that the input bodies' `fma` instructions
+/// call, unless the caller already supplies a function of that name.
+fn with_fma_helpers<'a>(input: &[ObjFunc<'a>]) -> Vec<ObjFunc<'a>> {
+    use cranelift_codegen::ir::types;
+    let mut funcs = input.to_vec();
+    for (kind, name, ty) in [
+        (crate::RuntimeFn::FmaF32, "__clif2wasm_fma_f32", types::F32),
+        (crate::RuntimeFn::FmaF64, "__clif2wasm_fma_f64", types::F64),
+    ] {
+        if input.iter().any(|f| f.name == name) {
+            continue;
+        }
+        let used = input.iter().any(|f| match &f.def {
+            Some(ObjDef::Clif(clif)) => clif.layout.blocks().any(|block| {
+                clif.layout.block_insts(block).any(|inst| {
+                    clif.dfg.insts[inst].opcode() == ir::Opcode::Fma
+                        && clif.dfg.value_type(clif.dfg.first_result(inst)) == ty
+                })
+            }),
+            _ => false,
+        });
+        if !used {
+            continue;
+        }
+        let mut sig = ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        for _ in 0..3 {
+            sig.params.push(ir::AbiParam::new(ty));
+        }
+        sig.returns.push(ir::AbiParam::new(ty));
+        funcs.push(ObjFunc {
+            name,
+            binding: ObjBinding::Weak,
+            hidden: true,
+            def: Some(ObjDef::Runtime(kind)),
+            sig,
+        });
+    }
+    funcs
+}
+
 pub(crate) fn translate<'a>(
-    funcs: &'a [ObjFunc<'a>],
+    input_funcs: &[ObjFunc<'a>],
     data: &'a [ObjData<'a>],
     opts: TranslateOptions,
 ) -> Result<Relocatable<'a>> {
+    let funcs_owned = with_fma_helpers(input_funcs);
+    let funcs = &funcs_owned[..];
     let mut module = waffle::Module::empty();
 
     let mem0 = module.memories.push(MemoryData {
@@ -496,7 +542,17 @@ pub(crate) fn translate<'a>(
         marker_relocs.insert(g.index() as u32, (R_CLIF2WASM_STACK_LIMIT, u32::MAX, None));
     }
 
+    let mut helpers: HashMap<crate::RuntimeFn, waffle::Func> = HashMap::new();
+    for (k, f) in funcs.iter().enumerate() {
+        if let Some(ObjDef::Runtime(kind @ (crate::RuntimeFn::FmaF32 | crate::RuntimeFn::FmaF64))) =
+            f.def
+        {
+            helpers.insert(kind, wfuncs[k]);
+        }
+    }
+
     let mctx = ModCtx {
+        helpers: &helpers,
         callees: &wfuncs,
         testcase_callees: &testcase_callees,
         mem0,
@@ -556,7 +612,7 @@ pub(crate) fn translate<'a>(
     }
 
     Ok(Relocatable {
-        funcs,
+        funcs: funcs_owned,
         data,
         signatures: module
             .signatures

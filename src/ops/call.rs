@@ -327,3 +327,31 @@ pub(crate) fn lower_try_call(
     let rets = emit_call(body, wb, call.0, &call.1, &return_types)?;
     crate::bridge::block_target(cx, bmap, table.normal_return(), &rets)
 }
+
+pub(super) fn lower_fma(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+    args: [ir::Value; 3],
+) -> Result<()> {
+    let ty = cx.vty(cx.clif.dfg.first_result(inst));
+    let kind = match ty {
+        types::F32 => crate::RuntimeFn::FmaF32,
+        types::F64 => crate::RuntimeFn::FmaF64,
+        other => unsupported!("fma on {other} is unsupported"),
+    };
+    let callee =
+        cx.m.helpers
+            .get(&kind)
+            .copied()
+            .with_context(|| format!("{kind:?} helper was not synthesized for this module"))?;
+    let mut wargs = Vec::with_capacity(3);
+    for arg in args {
+        wargs.extend(cx.expand_use(arg)?);
+    }
+    let op = Operator::Call {
+        function_index: callee,
+    };
+    bind_call_results(cx, body, wb, inst, op, &wargs)
+}

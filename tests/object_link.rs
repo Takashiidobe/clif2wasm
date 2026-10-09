@@ -244,3 +244,27 @@ block0:
     assert!(message.contains("CLIF2WASM-E2000"), "{message}");
     assert!(message.contains("tls_value"), "{message}");
 }
+
+#[test]
+fn fma_helper_links_and_runs() {
+    let source = "
+function %count(i32) -> i32 {
+block0(v0: i32):
+    return v0
+}
+function %main(i32) -> i32 {
+block0(v0: i32):
+    v1 = f64const 0x1.0000002p0
+    v2 = f64const 0x1.ffffffcp-1
+    v3 = f64const -0x1.0p0
+    v4 = fma v1, v2, v3
+    v5 = f64const 0.0
+    v6 = fcmp lt v4, v5
+    v7 = uextend.i32 v6
+    return v7
+}
+";
+    if let Some(value) = link_and_call("fma", source, &[], 0) {
+        assert_eq!(value, 1);
+    }
+}

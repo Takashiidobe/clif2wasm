@@ -352,6 +352,11 @@ pub fn lower_inst(
             }
         }
 
+        InstructionData::Ternary {
+            opcode: Opcode::Fma,
+            args,
+        } => lower_fma(cx, body, wb, inst, args)?,
+
         // --- Select ---
         InstructionData::Ternary {
             opcode: Opcode::Select | Opcode::SelectSpectreGuard,
