@@ -1,0 +1,12 @@
+; run: %f(0) == 0
+; run: %f(1) == 1
+; run: %f(-1) == -1
+; run: %f(32767) == 32767
+; run: %f(-32768) == -32768
+; run: %f(-2) == -2
+; run: %f(256) == 256
+function %f(i16) -> i64 {
+block0(v0: i16):
+    v1 = sextend.i64 v0
+    return v1
+}

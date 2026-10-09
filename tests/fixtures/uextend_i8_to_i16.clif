@@ -1,0 +1,12 @@
+; run: %f(0) == 0
+; run: %f(1) == 1
+; run: %f(-1) == 255
+; run: %f(127) == 127
+; run: %f(-128) == 128
+; run: %f(-2) == 254
+; run: %f(64) == 64
+function %f(i8) -> i16 {
+block0(v0: i8):
+    v1 = uextend.i16 v0
+    return v1
+}

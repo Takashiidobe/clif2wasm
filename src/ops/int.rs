@@ -379,6 +379,15 @@ pub(super) fn lower_unary(
                         cx.bind1(result, n);
                         return Ok(());
                     }
+                    if dst_ty == types::I16 {
+                        let wv = if signed {
+                            mask_narrow(body, wb, n, dst_ty)
+                        } else {
+                            n
+                        };
+                        cx.bind1(result, wv);
+                        return Ok(());
+                    }
                     (n, types::I32)
                 }
                 types::I32 | types::I64 => (v, src_ty),
