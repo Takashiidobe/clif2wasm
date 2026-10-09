@@ -506,3 +506,72 @@ block2(v2: i64):
         assert!(message.contains("exception handlers"), "{message}");
     }
 }
+
+#[test]
+fn tail_call_to_a_host_import() {
+    let mut module = WasmModule::new().unwrap();
+    module.allow_import("host_add");
+    let host_src =
+        "function %host_add(i32, i32) -> i32 {\nblock0(v0: i32, v1: i32):\n    return v0\n}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = (i32, i32) -> i32
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    return_call fn0(v0, v0)
+}";
+    declare(&mut module, "host_add", Linkage::Import, host_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 7), 7 + 7 + 1000);
+}
+
+#[test]
+fn tail_call_forwards_multi_value_results_and_frees_the_frame() {
+    let mut module = WasmModule::new().unwrap();
+    let pair_src = "function %pair(i32) -> i32, i8 tail {
+block0(v0: i32):
+    v1 = iadd v0, v0
+    v2 = ireduce.i8 v0
+    return v1, v2
+}";
+    let forward_src = "function %forward(i32) -> i32, i8 tail {
+    ss0 = explicit_slot 64
+    sig0 = (i32) -> i32, i8 tail
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    v1 = stack_addr.i32 ss0
+    store v0, v1
+    return_call fn0(v0)
+}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = (i32) -> i32, i8 tail
+    fn0 = colocated u0:1 sig0
+block0(v0: i32):
+    v1, v2 = call fn0(v0)
+    v3 = uextend.i32 v2
+    v4 = iadd v1, v3
+    return v4
+}";
+    let pair = declare(&mut module, "pair", Linkage::Local, pair_src);
+    let forward = declare(&mut module, "forward", Linkage::Local, forward_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, pair, pair_src);
+    define(&mut module, forward, forward_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 300), 644);
+}
+
+#[test]
+fn tail_call_to_a_libcall_is_rejected() {
+    let message = translate_error(
+        "function %main(i32, i32, i32) tail {
+    sig0 = (i32, i32, i32) -> i32 tail
+    fn0 = %Memcpy sig0
+block0(v0: i32, v1: i32, v2: i32):
+    return_call fn0(v0, v1, v2)
+}",
+    );
+    assert!(message.contains("tail libcall unsupported"), "{message}");
+}
