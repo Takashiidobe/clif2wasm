@@ -176,8 +176,9 @@ block0:
 }
 
 #[test]
-fn stack_overflow_traps() {
+fn shadow_stack_overflow_check_traps_before_memory_is_exhausted() {
     let mut module = WasmModule::new().unwrap();
+    // the 17th nested 4 KiB frame sits below the stack base but still in bounds, so only the limit check traps
     let main_src = "function %main(i32) -> i32 {
     ss0 = explicit_slot 4096
     sig0 = (i32) -> i32
@@ -185,24 +186,32 @@ fn stack_overflow_traps() {
 block0(v0: i32):
     v1 = stack_addr.i32 ss0
     store v0, v1
-    v2 = call fn0(v0)
-    return v2
+    brif v0, block1, block2
+block1:
+    v2 = iconst.i32 1
+    v3 = isub v0, v2
+    v4 = call fn0(v3)
+    return v4
+block2:
+    v5 = iconst.i32 0
+    return v5
 }";
     let main = declare(&mut module, "main", Linkage::Export, main_src);
     define(&mut module, main, main_src);
     let bytes = module.finish().unwrap();
     let engine = Engine::default();
     let module = Module::new(&engine, &bytes[..]).unwrap();
-    let mut store = Store::new(&engine, ());
-    let instance = Linker::<()>::new(&engine)
-        .instantiate_and_start(&mut store, &module)
-        .unwrap();
-    let func = instance.get_func(&store, "main").unwrap();
-    let mut results = [wasmi::Val::I32(0)];
-    assert!(
-        func.call(&mut store, &[wasmi::Val::I32(1)], &mut results)
-            .is_err()
-    );
+    let call = |depth: i32| {
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::<()>::new(&engine)
+            .instantiate_and_start(&mut store, &module)
+            .unwrap();
+        let func = instance.get_func(&store, "main").unwrap();
+        let mut results = [wasmi::Val::I32(0)];
+        func.call(&mut store, &[wasmi::Val::I32(depth)], &mut results)
+    };
+    assert!(call(15).is_ok());
+    assert!(call(16).is_err());
 }
 
 #[test]

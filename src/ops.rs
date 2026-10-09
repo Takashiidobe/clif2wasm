@@ -300,71 +300,36 @@ pub fn lower_inst(
                 unsupported!("unimplemented global value form {gvd:?} (only Symbol)");
             };
             ensure!(!tls, "TLS symbols are out of scope");
-            // Object mode: the address is the linker's to assign — emit a marker
-            // global.get; the object writer splices it into i32.const + reloc.
-            if let Some(mk) = cx.m.object_markers {
-                let ir::ExternalName::User(r) = name else {
-                    unsupported!("unsupported data symbol name {name:?} in object mode");
-                };
-                let user = cx
-                    .clif
-                    .params
-                    .user_named_funcs()
-                    .get(*r)
-                    .context("dangling userextname in object mode")?;
-                ensure!(
-                    user.namespace == 1,
-                    "data symbol has namespace {} (expected 1)",
-                    user.namespace
-                );
-                let off: i64 = (*offset).into();
-                let g = mk.data.get(&(user.index, off)).with_context(|| {
-                    format!("no marker for data ordinal {} offset {off}", user.index)
-                })?;
-                let wv = body.add_op(
-                    wb,
-                    Operator::GlobalGet { global_index: *g },
-                    &[],
-                    &[Type::I32],
-                );
-                cx.bind1(result, wv);
-                return Ok(());
-            }
-            let base = match name {
-                ir::ExternalName::User(r) => {
-                    // Side table FIRST: in reader-parsed dumps the `userextnameN` ref
-                    // indexes cg_clif's original table, which the text doesn't carry —
-                    // cranelift-reader rebuilds its own table from `u0:M` callee tokens,
-                    // so the ref can FALSELY resolve to a callee entry. The comment-borne
-                    // side table is the only trustworthy identity for parsed input.
-                    if let Some(sym) = cx.gv_symbols.get(&global_value.as_u32()) {
-                        cx.m.data_addr_for_symbol(sym)?
-                    } else if let Some(user) = cx.clif.params.user_named_funcs().get(*r) {
-                        // Hand-built path: cg_clif convention, namespace 1 = DataId.
-                        ensure!(
-                            user.namespace == 1,
-                            "data symbol has namespace {} (expected 1)",
-                            user.namespace
-                        );
-                        *cx.m.data_addrs.get(user.index as usize).with_context(|| {
-                            format!(
-                                "data index {} out of range ({} objects)",
-                                user.index,
-                                cx.m.data_addrs.len()
-                            )
-                        })?
-                    } else {
-                        bail!(
-                            "gv{}: dangling userextname and no side-table entry",
-                            global_value.as_u32()
-                        )
-                    }
-                }
-                other => unsupported!("unsupported data symbol name {other:?}"),
+            let ir::ExternalName::User(r) = name else {
+                unsupported!("unsupported data symbol name {name:?}");
             };
+            let user = cx
+                .clif
+                .params
+                .user_named_funcs()
+                .get(*r)
+                .context("dangling userextname on data symbol")?;
+            ensure!(
+                user.namespace == 1,
+                "data symbol has namespace {} (expected 1)",
+                user.namespace
+            );
             let off: i64 = (*offset).into();
-            let addr = (base as i64 + off) as u32;
-            let wv = body.add_op(wb, Operator::I32Const { value: addr }, &[], &[Type::I32]);
+            let marker =
+                cx.m.object_markers
+                    .data
+                    .get(&(user.index, off))
+                    .with_context(|| {
+                        format!("no marker for data ordinal {} offset {off}", user.index)
+                    })?;
+            let wv = body.add_op(
+                wb,
+                Operator::GlobalGet {
+                    global_index: *marker,
+                },
+                &[],
+                &[Type::I32],
+            );
             cx.bind1(result, wv);
         }
 
@@ -1321,43 +1286,23 @@ pub fn lower_inst(
             let (ordinal, _) = resolve_callee(cx, func_ref)?;
             let ordinal =
                 ordinal.context("func_addr of a libcall helper is unsupported (no table slot)")?;
-            // Object mode: the table slot is the linker's to assign — marker global.
-            if let Some(mk) = cx.m.object_markers {
-                let g = mk
+            let marker =
+                cx.m.object_markers
                     .funcs
                     .get(&ordinal)
                     .with_context(|| format!("no marker for func_addr of ordinal {ordinal}"))?;
-                let marker = body.add_op(
-                    wb,
-                    Operator::GlobalGet { global_index: *g },
-                    &[],
-                    &[Type::I32],
-                );
-                let wv = if result_ty == types::I64 {
-                    body.add_op(wb, Operator::I64ExtendI32U, &[marker], &[Type::I64])
-                } else {
-                    marker
-                };
-                cx.bind1(result, wv);
-                return Ok(());
-            }
-            // Table slot 0 is null; function k lives at k+1.
-            let wv = match result_ty {
-                types::I32 => body.add_op(
-                    wb,
-                    Operator::I32Const { value: ordinal + 1 },
-                    &[],
-                    &[Type::I32],
-                ),
-                types::I64 => body.add_op(
-                    wb,
-                    Operator::I64Const {
-                        value: (ordinal + 1) as u64,
-                    },
-                    &[],
-                    &[Type::I64],
-                ),
-                _ => unreachable!(),
+            let marker = body.add_op(
+                wb,
+                Operator::GlobalGet {
+                    global_index: *marker,
+                },
+                &[],
+                &[Type::I32],
+            );
+            let wv = if result_ty == types::I64 {
+                body.add_op(wb, Operator::I64ExtendI32U, &[marker], &[Type::I64])
+            } else {
+                marker
             };
             cx.bind1(result, wv);
         }
@@ -3988,13 +3933,9 @@ pub(crate) fn resolve_callee(
             return Ok((Some(*ordinal), *callee));
         }
         ir::ExternalName::LibCall(lc) => {
-            let object_mode = cx.m.object_markers.is_some();
             let kind = match lc {
                 ir::LibCall::Memcpy => crate::RuntimeFn::Memcpy,
-                // Whole-module mode merges memmove into the overlap-safe
-                // memory.copy helper; object mode must keep the real name.
-                ir::LibCall::Memmove if object_mode => crate::RuntimeFn::Memmove,
-                ir::LibCall::Memmove => crate::RuntimeFn::Memcpy,
+                ir::LibCall::Memmove => crate::RuntimeFn::Memmove,
                 ir::LibCall::Memset => crate::RuntimeFn::Memset,
                 ir::LibCall::Memcmp => crate::RuntimeFn::Memcmp,
                 other => unsupported!("unimplemented libcall callee {other}"),

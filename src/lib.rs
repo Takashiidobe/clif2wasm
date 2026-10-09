@@ -8,65 +8,17 @@
 pub mod bridge;
 pub mod error;
 pub mod i128_lower;
+mod link;
 mod module;
 mod module_impl;
 pub use module_impl::WasmModule;
 pub mod object;
 pub mod ops;
+mod relocatable;
 pub mod runtime_i128;
-
-use std::collections::HashMap;
 
 use crate::error::{Error, ErrorCode, Result as ClifResult};
 use cranelift_codegen::ir;
-
-/// A CLIF function plus the name it will carry in the emitted wasm module.
-pub(crate) struct NamedClifFunc<'a> {
-    pub name: &'a str,
-    pub func: &'a ir::Function,
-    /// For reader-parsed dumps only: global-value index -> the symbol identity from the
-    /// dump's `gvN = symbol ... ; <comment>` line. Hand-built CLIF resolves data refs
-    /// through `user_named_funcs` (namespace 1 = data ordinal) and leaves this empty.
-    pub gv_symbols: HashMap<u32, String>,
-}
-
-impl<'a> NamedClifFunc<'a> {
-    pub fn new(name: &'a str, func: &'a ir::Function) -> Self {
-        NamedClifFunc {
-            name,
-            func,
-            gv_symbols: HashMap::new(),
-        }
-    }
-}
-
-/// A static data object to place in linear memory (what cg_clif's `define_data`
-/// would hand a real `Module` impl).
-pub(crate) struct NamedClifData<'a> {
-    pub name: &'a str,
-    pub bytes: Vec<u8>,
-    pub align: u32,
-    /// Pointer slots inside the bytes, patched after layout: a data target becomes its
-    /// linear-memory address; a function target becomes its funcref-table index (the
-    /// same value `func_addr` produces). All slots are 4-byte LE (wasm32 pointers).
-    pub relocs: Vec<DataRelocEntry>,
-}
-
-impl<'a> NamedClifData<'a> {
-    pub fn new(name: &'a str, bytes: Vec<u8>, align: u32) -> Self {
-        NamedClifData {
-            name,
-            bytes,
-            align,
-            relocs: vec![],
-        }
-    }
-
-    pub fn with_relocs(mut self, relocs: Vec<DataRelocEntry>) -> Self {
-        self.relocs = relocs;
-        self
-    }
-}
 
 #[derive(Copy, Clone, Debug)]
 pub enum DataRelocTarget {
@@ -95,9 +47,8 @@ pub struct TranslationOptions {
 pub enum RuntimeFn {
     /// `(dest: i32, src: i32, n: i32) -> dest` via `memory.copy` (covers memmove).
     Memcpy,
-    /// Distinct from `Memcpy` ONLY for object mode, where each becomes its own
-    /// undefined import (libc memcpy is not overlap-safe, so the names must not
-    /// merge). The whole-module synthesized body is the same `memory.copy`.
+    /// Kept distinct from `Memcpy` so object output imports it under its own name
+    /// (libc memcpy is not overlap-safe). Linked modules synthesize the same `memory.copy`.
     Memmove,
     /// `(dest: i32, byte: i32, n: i32) -> dest` via `memory.fill`.
     Memset,

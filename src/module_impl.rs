@@ -24,7 +24,8 @@ use cranelift_module::{
 use target_lexicon::Triple;
 
 use crate::error::{Context, Error, Result};
-use crate::{NamedClifData, NamedClifFunc, bail, unsupported};
+use crate::object::{ObjBinding, ObjData, ObjDataDef, ObjDef, ObjFunc};
+use crate::{bail, unsupported};
 
 pub struct WasmModule {
     isa: OwnedTargetIsa,
@@ -185,7 +186,7 @@ impl WasmModule {
             self.data_addresses
                 .push(allocate(size, data.align.unwrap_or(8) as u32)?);
         }
-        let bytes = self.emit(Some(crate::module::SessionLayout {
+        let bytes = self.emit(Some(crate::link::SessionLayout {
             data_addresses: &self.data_addresses,
             initialized_data: self.initialized_data,
         }))?;
@@ -203,9 +204,9 @@ impl WasmModule {
         Ok(bytes)
     }
 
-    fn emit(&self, layout: Option<crate::module::SessionLayout<'_>>) -> Result<Vec<u8>> {
+    fn emit(&self, layout: Option<crate::link::SessionLayout<'_>>) -> Result<Vec<u8>> {
         // Data objects, in DataId order (= namespace-1 index order).
-        let mut data_objs: Vec<NamedClifData> = Vec::new();
+        let mut data_objs: Vec<ObjData> = Vec::new();
         let mut data_names: Vec<String> = Vec::new();
         for (id, decl) in self.declarations.get_data_objects() {
             data_names.push(
@@ -287,7 +288,16 @@ impl WasmModule {
                 ),
             };
             let align = desc.and_then(|d| d.align).unwrap_or(8) as u32;
-            data_objs.push(NamedClifData::new(&data_names[i], bytes, align).with_relocs(relocs));
+            data_objs.push(ObjData {
+                name: &data_names[i],
+                binding: ObjBinding::Global,
+                hidden: false,
+                def: Some(ObjDataDef {
+                    bytes,
+                    align,
+                    relocs,
+                }),
+            });
         }
 
         // Functions, in FuncId order (= namespace-0 index order = slice ordinal).
@@ -352,27 +362,48 @@ impl WasmModule {
                 missing.join("\n  ")
             );
         }
-        let mut named: Vec<NamedClifFunc> = Vec::new();
-        let mut exports: Vec<&str> = Vec::new();
+        let mut funcs: Vec<ObjFunc> = Vec::new();
+        let mut exports: Vec<(usize, &str)> = Vec::new();
         for (i, (id, decl)) in self.declarations.get_functions().enumerate() {
             let func: &ir::Function = match which[i] {
                 None => &self.funcs[&id],
                 Some(s) => &stub_storage[s],
             };
-            named.push(NamedClifFunc::new(&fn_names[i], func));
+            let (name, def) = if let Some(import_name) = import_map.get(&i) {
+                (import_name.as_str(), None)
+            } else if let Some(&kind) = runtime_overrides.get(&i) {
+                (fn_names[i].as_str(), Some(ObjDef::Runtime(kind)))
+            } else {
+                (fn_names[i].as_str(), Some(ObjDef::Clif(func)))
+            };
+            funcs.push(ObjFunc {
+                name,
+                binding: ObjBinding::Global,
+                hidden: false,
+                def,
+                sig: decl.signature.clone(),
+            });
             if decl.linkage == Linkage::Export || layout.is_some() {
-                exports.push(&fn_names[i]);
+                exports.push((i, &fn_names[i]));
             }
         }
 
-        crate::module::translate_module_with_layout_options(
-            &named,
+        let relocatable = crate::relocatable::translate(
+            &funcs,
             &data_objs,
-            &exports,
-            &runtime_overrides,
-            &import_map,
-            layout,
-            self.translation_options,
+            crate::relocatable::TranslateOptions {
+                shared_memory: self.translation_options.shared_memory_max_pages.is_some(),
+                lenient,
+                stack_limit: true,
+            },
+        )?;
+        crate::link::link(
+            &relocatable,
+            &crate::link::LinkOptions {
+                shared_memory_max_pages: self.translation_options.shared_memory_max_pages,
+                session: layout,
+                exports: &exports,
+            },
         )
     }
 
@@ -482,7 +513,6 @@ impl WasmModule {
                 hidden,
                 def,
                 sig: decl.signature.clone(),
-                gv_symbols: std::collections::HashMap::new(),
             });
         }
 

@@ -526,7 +526,6 @@ fn supported_symbol_value_opcode_is_fuzzed() {
             hidden: false,
             def: Some(ObjDef::Clif(function)),
             sig: function.signature.clone(),
-            gv_symbols: Default::default(),
         }];
         let data = [ObjData {
             name: "data",

@@ -1,75 +1,23 @@
-//! Relocatable wasm object emission (Phase B1) — the LLVM tool-conventions format:
+//! Relocatable wasm object emission — the LLVM tool-conventions format:
 //! <https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md>.
 //!
-//! Where `module.rs` assembles one COMPLETE wasm module (absolute data addresses,
-//! stubs for anything undefined), this emits a LINKABLE object: undefined symbols
-//! stay undefined (function imports from `env`), data lands in named segments placed
-//! by the linker, and a `linking` custom section carries the symbol table.
-//!
-//! Emission strategy: we build ONE waffle module whose entity layout equals the
-//! object's index space — memory 0 = imported `__linear_memory`, global 0 = imported
-//! `__stack_pointer`, table 0 = imported `__indirect_function_table`, function
-//! imports first — and compile each body with `WasmFuncBackend::compile`. Immediates
-//! in the result are raw entity indices, so they are already correct for the object's
-//! index space. A splicer then re-emits the reloc-bearing instructions with padded
-//! LEBs (waffle's encoder only writes minimal ones), and we hand-assemble the object
-//! file around the bodies. We own every byte, so reloc offsets fall out of the stream.
+//! This is one of two consumers of `relocatable::translate` (the other is the
+//! in-process linker in `link.rs`): undefined symbols stay undefined (function imports
+//! from `env`), data becomes named segments placed by the linker, and a `linking`
+//! custom section carries the symbol table. We own every byte, so reloc offsets fall
+//! out of the byte stream.
 
 use std::collections::HashMap;
 
-use crate::error::{Context, Result};
+use crate::error::Result;
+use crate::relocatable::{
+    R_WASM_MEMORY_ADDR_I32, R_WASM_TABLE_INDEX_I32, Reloc, Relocatable, TranslateOptions, sleb,
+    uleb,
+};
 use crate::{bail, ensure};
-use cranelift_codegen::ir;
-use waffle::backend::WasmFuncBackend;
-use waffle::{FuncDecl, GlobalData, MemoryData, SignatureData, TableData, Type};
+use waffle::{SignatureData, Type};
 
-use crate::DataRelocEntry;
-use crate::bridge::{self, ModCtx};
-use crate::module::{intern_sig, signature_data};
-
-/// Symbol binding for the object's symbol table.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ObjBinding {
-    Global,
-    Weak,
-    Local,
-}
-
-/// A function definition: translated CLIF, or a synthesized runtime body
-/// (i128 helpers via CLIF synthesis, memory.grow/size directly in waffle IR).
-pub enum ObjDef<'a> {
-    Clif(&'a ir::Function),
-    Runtime(crate::RuntimeFn),
-}
-
-/// One function slot, in FuncId order. `def: None` = undefined: it becomes a
-/// function import from `env` plus an undefined symbol for the linker to resolve.
-pub struct ObjFunc<'a> {
-    pub name: &'a str,
-    pub binding: ObjBinding,
-    pub hidden: bool,
-    pub def: Option<ObjDef<'a>>,
-    /// Authoritative signature (the declaration's; for defined functions this must
-    /// match `def.signature`).
-    pub sig: ir::Signature,
-    /// Reader-dump gv side table (empty when driven from the Module seam).
-    pub gv_symbols: HashMap<u32, String>,
-}
-
-pub struct ObjDataDef {
-    pub bytes: Vec<u8>,
-    /// Linear alignment (power of two); emitted as log2 in SEGMENT_INFO.
-    pub align: u32,
-    pub relocs: Vec<DataRelocEntry>,
-}
-
-/// One data slot, in DataId order. `def: None` = undefined data symbol.
-pub struct ObjData<'a> {
-    pub name: &'a str,
-    pub binding: ObjBinding,
-    pub hidden: bool,
-    pub def: Option<ObjDataDef>,
-}
+pub use crate::relocatable::{ObjBinding, ObjData, ObjDataDef, ObjDef, ObjFunc};
 
 // --- linking-section constants (tool-conventions Linking.md) ---
 const WASM_SYMBOL_TABLE: u8 = 8;
@@ -82,27 +30,6 @@ const WASM_SYM_BINDING_WEAK: u32 = 0x01;
 const WASM_SYM_BINDING_LOCAL: u32 = 0x02;
 const WASM_SYM_VISIBILITY_HIDDEN: u32 = 0x04;
 const WASM_SYM_UNDEFINED: u32 = 0x10;
-
-// --- relocation types ---
-const R_WASM_FUNCTION_INDEX_LEB: u8 = 0;
-const R_WASM_TABLE_INDEX_SLEB: u8 = 1;
-const R_WASM_TABLE_INDEX_I32: u8 = 2;
-const R_WASM_MEMORY_ADDR_SLEB: u8 = 4;
-const R_WASM_MEMORY_ADDR_I32: u8 = 5;
-const R_WASM_TYPE_INDEX_LEB: u8 = 6;
-const R_WASM_GLOBAL_INDEX_LEB: u8 = 7;
-const R_WASM_TABLE_NUMBER_LEB: u8 = 20;
-
-/// One relocation record. `index` is a symbol index for every type we emit except
-/// TYPE_INDEX_LEB, where it is the type index itself. `addend` is emitted only for
-/// the MEMORY_ADDR_* / FUNCTION_OFFSET_* families.
-#[derive(Debug)]
-struct Reloc {
-    ty: u8,
-    offset: u32,
-    index: u32,
-    addend: Option<i64>,
-}
 
 fn emit_reloc_section(w: &mut ObjWriter, name: &str, target_section: u32, relocs: &[Reloc]) {
     let mut p = Vec::new();
@@ -132,51 +59,6 @@ const TARGET_FEATURES: &[&str] = &[
     "sign-ext",
 ];
 
-// --- byte-stream helpers ---
-fn uleb(out: &mut Vec<u8>, mut v: u64) {
-    loop {
-        let b = (v & 0x7f) as u8;
-        v >>= 7;
-        if v == 0 {
-            out.push(b);
-            break;
-        }
-        out.push(b | 0x80);
-    }
-}
-
-fn sleb(out: &mut Vec<u8>, mut v: i64) {
-    loop {
-        let b = (v & 0x7f) as u8;
-        v >>= 7;
-        let sign = b & 0x40 != 0;
-        if (v == 0 && !sign) || (v == -1 && sign) {
-            out.push(b);
-            break;
-        }
-        out.push(b | 0x80);
-    }
-}
-
-/// Exactly-5-byte ULEB — reloc sites must be padded so the linker can patch any
-/// u32 in place.
-fn uleb_padded5(out: &mut Vec<u8>, v: u32) {
-    out.push((v & 0x7f) as u8 | 0x80);
-    out.push(((v >> 7) & 0x7f) as u8 | 0x80);
-    out.push(((v >> 14) & 0x7f) as u8 | 0x80);
-    out.push(((v >> 21) & 0x7f) as u8 | 0x80);
-    out.push(((v >> 28) & 0x0f) as u8);
-}
-
-/// Exactly-5-byte SLEB (i32 range) for SLEB-typed reloc sites.
-fn sleb_padded5(out: &mut Vec<u8>, v: i32) {
-    out.push((v & 0x7f) as u8 | 0x80);
-    out.push(((v >> 7) & 0x7f) as u8 | 0x80);
-    out.push(((v >> 14) & 0x7f) as u8 | 0x80);
-    out.push(((v >> 21) & 0x7f) as u8 | 0x80);
-    out.push(((v >> 28) & 0x7f) as u8); // arithmetic shift keeps the sign bits
-}
-
 fn write_name(out: &mut Vec<u8>, s: &str) {
     uleb(out, s.len() as u64);
     out.extend_from_slice(s.as_bytes());
@@ -188,6 +70,7 @@ fn valtype_byte(t: Type) -> Result<u8> {
         Type::I64 => 0x7e,
         Type::F32 => 0x7d,
         Type::F64 => 0x7c,
+        Type::V128 => 0x7b,
         other => bail!("unsupported value type {other} in object emission"),
     })
 }
@@ -262,279 +145,40 @@ fn binding_flags(binding: ObjBinding, hidden: bool) -> u32 {
 
 /// Translate CLIF functions + data into a relocatable wasm object.
 pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> {
-    // ---- 1. waffle module scaffold: entity layout == object index space ----
-    let mut module = waffle::Module::empty();
+    write_object(&crate::relocatable::translate(
+        funcs,
+        data,
+        TranslateOptions::default(),
+    )?)
+}
 
-    let mem0 = module.memories.push(MemoryData {
-        initial_pages: 1,
-        maximum_pages: None,
-        segments: vec![],
-        memory64: false,
-        shared: false,
-        page_size_log2: None,
-    });
-    module.imports.push(waffle::Import {
-        module: "env".to_string(),
-        name: "__linear_memory".to_string(),
-        kind: waffle::ImportKind::Memory(mem0),
-    });
-    let sp_global = module.globals.push(GlobalData {
-        ty: Type::I32,
-        value: None,
-        mutable: true,
-    });
-    module.imports.push(waffle::Import {
-        module: "env".to_string(),
-        name: "__stack_pointer".to_string(),
-        kind: waffle::ImportKind::Global(sp_global),
-    });
-    let table = module.tables.push(TableData {
-        ty: Type::Heap(waffle::WithNullable {
-            value: waffle::HeapType::FuncRef,
-            nullable: true,
-        }),
-        initial: 0,
-        max: None,
-        func_elements: None,
-        table64: false,
-    });
-    module.imports.push(waffle::Import {
-        module: "env".to_string(),
-        name: "__indirect_function_table".to_string(),
-        kind: waffle::ImportKind::Table(table),
-    });
-
-    // Signatures (interned with dedup — type indices are shared by bodies'
-    // call_indirect immediates and our emitted type section).
-    let mut sig_cache: HashMap<SignatureData, waffle::Signature> = HashMap::new();
-    let mut sigs = Vec::with_capacity(funcs.len());
-    for f in funcs {
-        let sd = signature_data(&f.sig)
-            .with_context(|| format!("signature of function `{}`", f.name))?;
-        sigs.push(intern_sig(&mut module, &mut sig_cache, sd));
-    }
-
-    // Libcall callees (`ExternalName::LibCall`) become undefined imports under
-    // their real C names, resolved from compiler_builtins/libc at link time.
-    // (Whole-module mode synthesizes helpers instead; and there memmove merges
-    // into memcpy — here the names MUST stay distinct: libc memcpy is not
-    // overlap-safe.)
-    let mut libcall_sigs: HashMap<crate::RuntimeFn, waffle::Signature> = HashMap::new();
-    for f in funcs {
-        let Some(ObjDef::Clif(clif)) = &f.def else {
-            continue;
-        };
-        for ext in clif.dfg.ext_funcs.values() {
-            let ir::ExternalName::LibCall(lc) = ext.name else {
-                continue;
-            };
-            let kind = match lc {
-                ir::LibCall::Memcpy => crate::RuntimeFn::Memcpy,
-                ir::LibCall::Memmove => crate::RuntimeFn::Memmove,
-                ir::LibCall::Memset => crate::RuntimeFn::Memset,
-                ir::LibCall::Memcmp => crate::RuntimeFn::Memcmp,
-                other => bail!("unimplemented libcall callee {other} in `{}`", f.name),
-            };
-            if libcall_sigs.contains_key(&kind) {
-                continue;
-            }
-            let sd = signature_data(&clif.dfg.signatures[ext.signature])
-                .with_context(|| format!("libcall {lc} signature in `{}`", f.name))?;
-            libcall_sigs.insert(kind, intern_sig(&mut module, &mut sig_cache, sd));
-        }
-    }
-
-    // Function entities: imports (undefined + libcalls) FIRST so entity index ==
-    // wasm function index, then placeholders for defined functions.
-    use waffle::entity::EntityRef as _;
-    let mut wfuncs = vec![waffle::Func::invalid(); funcs.len()];
-    let mut import_fn_ords: Vec<usize> = Vec::new(); // input ordinal, in import order
-    let mut defined_fn_ords: Vec<usize> = Vec::new(); // input ordinal, in defined order
-    for (k, f) in funcs.iter().enumerate() {
-        if f.def.is_none() {
-            let wf = module
-                .funcs
-                .push(FuncDecl::Import(sigs[k], f.name.to_string()));
-            module.imports.push(waffle::Import {
-                module: "env".to_string(),
-                name: f.name.to_string(),
-                kind: waffle::ImportKind::Func(wf),
-            });
-            wfuncs[k] = wf;
-            import_fn_ords.push(k);
-        }
-    }
-    // Fixed order for determinism.
-    let mut libcalls: Vec<(
-        crate::RuntimeFn,
-        &'static str,
-        waffle::Func,
-        waffle::Signature,
-    )> = Vec::new();
-    let mut libcall_map: HashMap<crate::RuntimeFn, waffle::Func> = HashMap::new();
-    for (kind, cname) in [
-        (crate::RuntimeFn::Memcpy, "memcpy"),
-        (crate::RuntimeFn::Memmove, "memmove"),
-        (crate::RuntimeFn::Memset, "memset"),
-        (crate::RuntimeFn::Memcmp, "memcmp"),
-    ] {
-        let Some(&sig) = libcall_sigs.get(&kind) else {
-            continue;
-        };
-        let wf = module.funcs.push(FuncDecl::Import(sig, cname.to_string()));
-        module.imports.push(waffle::Import {
-            module: "env".to_string(),
-            name: cname.to_string(),
-            kind: waffle::ImportKind::Func(wf),
-        });
-        libcall_map.insert(kind, wf);
-        libcalls.push((kind, cname, wf, sig));
-    }
-    for (k, f) in funcs.iter().enumerate() {
-        if f.def.is_some() {
-            wfuncs[k] = module.funcs.push(FuncDecl::None);
-            defined_fn_ords.push(k);
-        }
-    }
-    // input ordinal -> wasm function index (imports first).
-    let fn_wasm_index = |k: usize| wfuncs[k].index() as u32;
-
-    // Pre-scan defined bodies for symbol references and allocate MARKER globals:
-    // one per unique (data ordinal, offset) for `symbol_value`, one per
-    // address-taken function for `func_addr`. Bodies emit `global.get <marker>`;
-    // the splicer rewrites each site into a padded i32.const + reloc. Marker
-    // globals are entities only — they are never emitted into any section.
-    let mut markers = bridge::ObjectMarkers::default();
-    for f in funcs {
-        let Some(ObjDef::Clif(clif)) = &f.def else {
-            continue;
-        };
-        for (_gv, gvd) in clif.global_values.iter() {
-            let ir::GlobalValueData::Symbol { name, offset, .. } = gvd else {
-                continue;
-            };
-            let ir::ExternalName::User(r) = name else {
-                continue;
-            };
-            let Some(user) = clif.params.user_named_funcs().get(*r) else {
-                continue;
-            };
-            if user.namespace != 1 {
-                continue;
-            }
-            let ord = user.index;
-            ensure!(
-                (ord as usize) < data.len(),
-                "function `{}` references data ordinal {ord} out of range",
-                f.name
-            );
-            let off: i64 = (*offset).into();
-            markers.data.entry((ord, off)).or_insert_with(|| {
-                module.globals.push(GlobalData {
-                    ty: Type::I32,
-                    value: Some(0),
-                    mutable: false,
-                })
-            });
-        }
-        for block in clif.layout.blocks() {
-            for inst in clif.layout.block_insts(block) {
-                let ir::InstructionData::FuncAddr { func_ref, .. } = clif.dfg.insts[inst] else {
-                    continue;
-                };
-                let ext = &clif.dfg.ext_funcs[func_ref];
-                let ir::ExternalName::User(r) = ext.name else {
-                    continue;
-                };
-                let Some(user) = clif.params.user_named_funcs().get(r) else {
-                    continue;
-                };
-                if user.namespace != 0 {
-                    continue;
-                }
-                let ord = user.index;
-                ensure!(
-                    (ord as usize) < funcs.len(),
-                    "function `{}` takes the address of ordinal {ord} out of range",
-                    f.name
-                );
-                markers.funcs.entry(ord).or_insert_with(|| {
-                    module.globals.push(GlobalData {
-                        ty: Type::I32,
-                        value: Some(0),
-                        mutable: false,
-                    })
-                });
-            }
-        }
-    }
-
-    // ---- 2. translate bodies ----
-    let empty_addrs: Vec<u32> = Vec::new();
-    let empty_by_name: HashMap<String, u32> = HashMap::new();
-    let empty_callees: HashMap<String, (u32, waffle::Func)> = HashMap::new();
-    let mctx = ModCtx {
-        callees: &wfuncs,
-        testcase_callees: &empty_callees,
-        mem0,
-        shared_memory: false,
-        stack_limit: None,
-        sp_global,
-        table,
-        data_addrs: &empty_addrs,
-        data_by_name: &empty_by_name,
-        libcalls: &libcall_map,
-        object_markers: Some(&markers),
-    };
-    let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(defined_fn_ords.len());
-    for &k in &defined_fn_ords {
-        let f = &funcs[k];
-        let body = match f.def.as_ref().unwrap() {
-            ObjDef::Clif(clif) => {
-                let mut sig_map: HashMap<ir::SigRef, waffle::Signature> = HashMap::new();
-                for (sig_ref, sig) in clif.dfg.signatures.iter() {
-                    let sd = signature_data(sig)
-                        .with_context(|| format!("SigRef {sig_ref} in function `{}`", f.name))?;
-                    sig_map.insert(sig_ref, intern_sig(&mut module, &mut sig_cache, sd));
-                }
-                bridge::translate_function(clif, &module, sigs[k], &mctx, &sig_map, &f.gv_symbols)
-                    .with_context(|| format!("translating function `{}`", f.name))?
-            }
-            &ObjDef::Runtime(kind) => {
-                if let Some(clif_fn) = crate::runtime_i128::build(kind) {
-                    let empty_sigs = HashMap::new();
-                    let empty_gvs = HashMap::new();
-                    bridge::translate_function(
-                        &clif_fn,
-                        &module,
-                        sigs[k],
-                        &mctx,
-                        &empty_sigs,
-                        &empty_gvs,
-                    )
-                    .with_context(|| format!("translating runtime `{}`", f.name))?
-                } else {
-                    crate::module::synth_runtime_body(kind, &module, sigs[k], mem0)
-                        .with_context(|| format!("synthesizing runtime `{}`", f.name))?
-                }
-            }
-        };
-        body.validate().map_err(|e| {
-            crate::error::Error::general(format!("waffle validate() rejected `{}`:\n{e}", f.name))
-        })?;
-        let compiled = WasmFuncBackend::compile(&body).map_err(|e| {
-            crate::error::Error::general(format!("waffle backend compile of `{}`: {e}", f.name))
-        })?;
-        bodies.push(compiled.into_raw_body());
-    }
-
-    // ---- 3. assemble the object ----
+fn write_object(rel: &Relocatable) -> Result<Vec<u8>> {
+    let funcs = rel.funcs;
+    let data = rel.data;
     let mut w = ObjWriter::new();
+
+    // Object function index space: undefined functions, then libcall imports, then
+    // defined functions — the order relocatable::translate allocated entities in.
+    let import_fn_ords: Vec<usize> = (0..funcs.len())
+        .filter(|&k| funcs[k].def.is_none())
+        .collect();
+    let mut fn_wasm_index = vec![0u32; funcs.len()];
+    let mut next = 0u32;
+    for &k in &import_fn_ords {
+        fn_wasm_index[k] = next;
+        next += 1;
+    }
+    let libcall_index_base = next;
+    next += rel.libcalls.len() as u32;
+    for body in &rel.bodies {
+        fn_wasm_index[body.ord] = next;
+        next += 1;
+    }
 
     // type section: waffle signatures in entity order.
     let mut p = Vec::new();
-    uleb(&mut p, module.signatures.len() as u64);
-    for (_sig, sd) in module.signatures.entries() {
+    uleb(&mut p, rel.signatures.len() as u64);
+    for sd in &rel.signatures {
         let SignatureData::Func {
             params, returns, ..
         } = sd
@@ -556,7 +200,10 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     // import section: memory, stack-pointer global, funcref table, undefined fns,
     // libcalls — function order MUST match entity allocation above.
     let mut p = Vec::new();
-    uleb(&mut p, (3 + import_fn_ords.len() + libcalls.len()) as u64);
+    uleb(
+        &mut p,
+        (3 + import_fn_ords.len() + rel.libcalls.len()) as u64,
+    );
     write_name(&mut p, "env");
     write_name(&mut p, "__linear_memory");
     p.extend_from_slice(&[0x02, 0x00, 0x01]); // memory, limits: min 1, no max
@@ -570,21 +217,21 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         write_name(&mut p, "env");
         write_name(&mut p, funcs[k].name);
         p.push(0x00); // func
-        uleb(&mut p, sigs[k].index() as u64);
+        uleb(&mut p, rel.func_sigs[k] as u64);
     }
-    for (_kind, cname, _wf, sig) in &libcalls {
+    for lc in &rel.libcalls {
         write_name(&mut p, "env");
-        write_name(&mut p, cname);
+        write_name(&mut p, lc.name);
         p.push(0x00); // func
-        uleb(&mut p, sig.index() as u64);
+        uleb(&mut p, lc.sig as u64);
     }
     w.section(2, &p);
 
     // function section: defined functions' signature indices, in entity order.
     let mut p = Vec::new();
-    uleb(&mut p, defined_fn_ords.len() as u64);
-    for &k in &defined_fn_ords {
-        uleb(&mut p, sigs[k].index() as u64);
+    uleb(&mut p, rel.bodies.len() as u64);
+    for body in &rel.bodies {
+        uleb(&mut p, rel.func_sigs[body.ord] as u64);
     }
     w.section(3, &p);
 
@@ -600,55 +247,32 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         uleb(&mut p, segments.len() as u64);
         w.section(12, &p); // DataCount
     }
-
     // Symbol index layout (must match the symbol table below): function symbols in
     // input order, then libcall symbols, then data symbols in input order, then
     // __stack_pointer, __indirect_function_table.
-    let data_sym_base = (funcs.len() + libcalls.len()) as u32;
-    let sp_sym = data_sym_base + data.len() as u32;
-    let table_sym = sp_sym + 1;
-    let mut fn_sym_of_wasm_index = vec![u32::MAX; funcs.len() + libcalls.len()];
-    for k in 0..funcs.len() {
-        fn_sym_of_wasm_index[fn_wasm_index(k) as usize] = k as u32;
-    }
-    for (j, (_kind, _cname, wf, _sig)) in libcalls.iter().enumerate() {
-        fn_sym_of_wasm_index[wf.index()] = (funcs.len() + j) as u32;
-    }
-    // marker global entity index -> (reloc type, symbol index, addend).
-    let mut marker_relocs: HashMap<u32, (u8, u32, Option<i64>)> = HashMap::new();
-    for (&(ord, off), g) in &markers.data {
-        marker_relocs.insert(
-            g.index() as u32,
-            (R_WASM_MEMORY_ADDR_SLEB, data_sym_base + ord, Some(off)),
-        );
-    }
-    for (&ord, g) in &markers.funcs {
-        marker_relocs.insert(g.index() as u32, (R_WASM_TABLE_INDEX_SLEB, ord, None));
-    }
+    let data_sym_base = rel.data_sym_base();
 
-    // code section: splice each body (padded reloc-site immediates + per-body
-    // relocs), then lay out the section, rebasing reloc offsets onto the payload.
+    // code section: bodies already carry padded reloc-site immediates; lay out the
+    // section, rebasing reloc offsets onto the payload.
     let mut code_relocs: Vec<Reloc> = Vec::new();
-    let mut uses_tail_call = false;
     let mut p = Vec::new();
-    uleb(&mut p, bodies.len() as u64);
-    for (i, body) in bodies.iter().enumerate() {
-        let (spliced, relocs) = splice_body(
-            body,
-            &fn_sym_of_wasm_index,
-            sp_sym,
-            table_sym,
-            &marker_relocs,
-            &mut uses_tail_call,
-        )
-        .with_context(|| format!("splicing function `{}`", funcs[defined_fn_ords[i]].name))?;
-        uleb(&mut p, spliced.len() as u64);
+    uleb(&mut p, rel.bodies.len() as u64);
+    for body in &rel.bodies {
+        uleb(&mut p, body.bytes.len() as u64);
         let body_base = p.len() as u32;
-        for mut r in relocs {
-            r.offset += body_base;
-            code_relocs.push(r);
+        for r in &body.relocs {
+            ensure!(
+                r.ty != crate::relocatable::R_CLIF2WASM_STACK_LIMIT,
+                "stack-limit relocation cannot be written to an object"
+            );
+            code_relocs.push(Reloc {
+                ty: r.ty,
+                offset: r.offset + body_base,
+                index: r.index,
+                addend: r.addend,
+            });
         }
-        p.extend_from_slice(&spliced);
+        p.extend_from_slice(&body.bytes);
     }
     let code_ord = w.section(10, &p);
 
@@ -722,15 +346,15 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         };
         syms.push(Sym::Func {
             flags,
-            index: fn_wasm_index(k),
+            index: fn_wasm_index[k],
             name,
         });
     }
-    for (_kind, _cname, wf, _sig) in &libcalls {
+    for j in 0..rel.libcalls.len() {
         // Undefined; name comes from the import entry.
         syms.push(Sym::Func {
             flags: WASM_SYM_UNDEFINED,
-            index: wf.index() as u32,
+            index: libcall_index_base + j as u32,
             name: None,
         });
     }
@@ -839,7 +463,7 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     }
 
     let mut features = TARGET_FEATURES.to_vec();
-    if uses_tail_call {
+    if rel.uses_tail_call {
         features.push("tail-call");
     }
     let mut tf = Vec::new();
@@ -851,142 +475,4 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     w.custom("target_features", &tf);
 
     Ok(w.out)
-}
-
-/// Splice one compiled body: copy bytes verbatim, except at reloc-bearing
-/// instructions, which are re-emitted with 5-byte padded LEB immediates and
-/// recorded as relocations (offsets relative to the START OF THIS BODY's bytes).
-///
-/// Reloc-bearing sites: `call`/`return_call` (FUNCTION_INDEX_LEB via the function's
-/// symbol), `call_indirect`/`return_call_indirect` (TYPE_INDEX_LEB on the type +
-/// TABLE_NUMBER_LEB on the table),
-/// `global.get/set` of the stack pointer (GLOBAL_INDEX_LEB). Any other global
-/// index or a `ref.func` is a bug at this stage — B1.c introduces marker globals.
-fn splice_body(
-    body: &[u8],
-    fn_sym_of_wasm_index: &[u32],
-    sp_sym: u32,
-    table_sym: u32,
-    marker_relocs: &HashMap<u32, (u8, u32, Option<i64>)>,
-    uses_tail_call: &mut bool,
-) -> Result<(Vec<u8>, Vec<Reloc>)> {
-    use wasmparser::Operator as Op;
-    let mut out = Vec::with_capacity(body.len() + 32);
-    let mut relocs = Vec::new();
-    let fb = wasmparser::FunctionBody::new(wasmparser::BinaryReader::new(body, 0));
-    let mut reader = fb
-        .get_operators_reader()
-        .context("reading Wasm operators")?;
-    let mut copied_to = 0usize; // source offset up to which bytes are flushed
-    while !reader.eof() {
-        let op_start = usize::try_from(reader.original_position())
-            .context("instruction offset exceeds address space")?;
-        let op = reader.read().context("reading Wasm operator")?;
-        let op_end = usize::try_from(reader.original_position())
-            .context("instruction end exceeds address space")?;
-        match op {
-            Op::Call { function_index } | Op::ReturnCall { function_index } => {
-                let tail = matches!(op, Op::ReturnCall { .. });
-                *uses_tail_call |= tail;
-                out.extend_from_slice(&body[copied_to..op_start]);
-                out.push(if tail { 0x12 } else { 0x10 });
-                let sym = *fn_sym_of_wasm_index
-                    .get(function_index as usize)
-                    .ok_or_else(|| {
-                        crate::error::Error::general(format!(
-                            "call to unknown function index {function_index}"
-                        ))
-                    })?;
-                relocs.push(Reloc {
-                    ty: R_WASM_FUNCTION_INDEX_LEB,
-                    offset: out.len() as u32,
-                    index: sym,
-                    addend: None,
-                });
-                uleb_padded5(&mut out, function_index);
-                copied_to = op_end;
-            }
-            Op::CallIndirect {
-                type_index,
-                table_index,
-            }
-            | Op::ReturnCallIndirect {
-                type_index,
-                table_index,
-            } => {
-                let tail = matches!(op, Op::ReturnCallIndirect { .. });
-                *uses_tail_call |= tail;
-                out.extend_from_slice(&body[copied_to..op_start]);
-                out.push(if tail { 0x13 } else { 0x11 });
-                relocs.push(Reloc {
-                    ty: R_WASM_TYPE_INDEX_LEB,
-                    offset: out.len() as u32,
-                    index: type_index, // type index, not a symbol
-                    addend: None,
-                });
-                uleb_padded5(&mut out, type_index);
-                ensure!(
-                    table_index == 0,
-                    "call_indirect through table {table_index}"
-                );
-                relocs.push(Reloc {
-                    ty: R_WASM_TABLE_NUMBER_LEB,
-                    offset: out.len() as u32,
-                    index: table_sym,
-                    addend: None,
-                });
-                uleb_padded5(&mut out, table_index);
-                copied_to = op_end;
-            }
-            Op::GlobalGet { global_index } => {
-                out.extend_from_slice(&body[copied_to..op_start]);
-                if global_index == 0 {
-                    out.push(0x23);
-                    relocs.push(Reloc {
-                        ty: R_WASM_GLOBAL_INDEX_LEB,
-                        offset: out.len() as u32,
-                        index: sp_sym,
-                        addend: None,
-                    });
-                    uleb_padded5(&mut out, 0);
-                } else if let Some(&(ty, sym, addend)) = marker_relocs.get(&global_index) {
-                    // Marker site: becomes a padded i32.const carrying a
-                    // MEMORY_ADDR_SLEB / TABLE_INDEX_SLEB relocation.
-                    out.push(0x41);
-                    relocs.push(Reloc {
-                        ty,
-                        offset: out.len() as u32,
-                        index: sym,
-                        addend,
-                    });
-                    sleb_padded5(&mut out, 0);
-                } else {
-                    bail!("global.get {global_index} is neither the stack pointer nor a marker");
-                }
-                copied_to = op_end;
-            }
-            Op::GlobalSet { global_index } => {
-                ensure!(
-                    global_index == 0,
-                    "global.set {global_index} in object mode"
-                );
-                out.extend_from_slice(&body[copied_to..op_start]);
-                out.push(0x24);
-                relocs.push(Reloc {
-                    ty: R_WASM_GLOBAL_INDEX_LEB,
-                    offset: out.len() as u32,
-                    index: sp_sym,
-                    addend: None,
-                });
-                uleb_padded5(&mut out, 0);
-                copied_to = op_end;
-            }
-            Op::RefFunc { .. } => {
-                bail!("ref.func in object mode is unsupported (unexpected from our lowering)")
-            }
-            _ => {}
-        }
-    }
-    out.extend_from_slice(&body[copied_to..]);
-    Ok((out, relocs))
 }

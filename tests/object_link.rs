@@ -43,7 +43,6 @@ fn build_object(label: &str, names: &[&'static str], source: &str, data: &[ObjDa
             hidden: false,
             def: Some(ObjDef::Clif(function)),
             sig: function.signature.clone(),
-            gv_symbols: Default::default(),
         })
         .collect::<Vec<_>>();
     let object = translate_object(&funcs, data).unwrap_or_else(|e| panic!("{label}: {e:#}"));

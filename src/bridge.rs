@@ -35,57 +35,31 @@ pub enum WVal {
 pub struct ModCtx<'a> {
     /// waffle Func index for each input function, by ordinal (call resolution).
     pub callees: &'a [waffle::Func],
+    /// Fixture-style `ExternalName::TestCase` callees, by function name.
     pub testcase_callees: &'a HashMap<String, (u32, waffle::Func)>,
     /// The module's single linear memory.
     pub mem0: waffle::Memory,
     pub shared_memory: bool,
-    pub stack_limit: Option<u32>,
-    /// The synthesized `__stack_pointer` mutable global.
+    /// The imported `__stack_pointer` mutable global.
     pub sp_global: waffle::Global,
-    /// The single funcref table (index 0 is null; function k lives at k+1).
+    /// The single funcref table (index 0 is null).
     pub table: waffle::Table,
-    /// Linear-memory address of each data object, by ordinal (namespace-1 index).
-    pub data_addrs: &'a [u32],
-    /// Data addresses by name, for gv-symbol side-table resolution of reader dumps.
-    pub data_by_name: &'a HashMap<String, u32>,
     /// Synthesized runtime helpers for `ExternalName::LibCall` callees.
     pub libcalls: &'a HashMap<crate::RuntimeFn, waffle::Func>,
-    /// Object mode (Phase B): symbol references lower to `global.get <marker>`
-    /// instead of absolute constants; the object writer's splicer rewrites each
-    /// marker site into a padded `i32.const` + relocation. `None` = whole-module
-    /// mode (absolute addresses).
-    pub object_markers: Option<&'a ObjectMarkers>,
+    /// Symbol references lower to `global.get <marker>`; the splicer rewrites each
+    /// marker site into a padded `i32.const` + relocation resolved by the linker.
+    pub object_markers: &'a ObjectMarkers,
 }
 
-/// Marker globals for object-mode symbol references (see `object.rs`).
+/// Marker globals for symbol references (see `relocatable.rs`).
 #[derive(Default)]
 pub struct ObjectMarkers {
     /// (data ordinal, byte offset) -> marker global.
     pub data: HashMap<(u32, i64), waffle::Global>,
     /// function ordinal (address-taken) -> marker global.
     pub funcs: HashMap<u32, waffle::Global>,
-}
-
-impl ModCtx<'_> {
-    /// Resolve a dump-comment symbol string to a data address: exact name match first,
-    /// then substring containment (dump comments carry `DefId(.. ~ crate[hash]::NAME)`
-    /// or `allocN` forms, not clean linkage names — prototype-grade matching, noted).
-    pub fn data_addr_for_symbol(&self, sym: &str) -> Result<u32> {
-        if let Some(&a) = self.data_by_name.get(sym) {
-            return Ok(a);
-        }
-        let mut hit = None;
-        for (name, &a) in self.data_by_name {
-            if sym.contains(name.as_str()) {
-                ensure!(
-                    hit.is_none(),
-                    "gv symbol `{sym}` matches multiple data names"
-                );
-                hit = Some(a);
-            }
-        }
-        hit.with_context(|| format!("no data object matches gv symbol `{sym}`"))
-    }
+    /// Address below which the shadow stack must not grow, when checked.
+    pub stack_limit: Option<waffle::Global>,
 }
 
 /// Synthesized shadow-stack frame for a function with sized stack slots.
@@ -104,8 +78,6 @@ pub struct FnCx<'a> {
     pub m: &'a ModCtx<'a>,
     /// CLIF SigRef -> interned waffle signature (for call_indirect).
     pub sig_map: &'a HashMap<ir::SigRef, waffle::Signature>,
-    /// gv index -> symbol identity, for reader-parsed dumps (see NamedClifFunc).
-    pub gv_symbols: &'a HashMap<u32, String>,
     pub frame: Option<Frame>,
     map: HashMap<ir::Value, WVal>,
 }
@@ -201,14 +173,12 @@ pub fn translate_function(
     sig: waffle::Signature,
     m: &ModCtx,
     sig_map: &HashMap<ir::SigRef, waffle::Signature>,
-    gv_symbols: &HashMap<u32, String>,
 ) -> Result<FunctionBody> {
     let mut body = FunctionBody::new(module, sig);
     let mut cx = FnCx {
         clif,
         m,
         sig_map,
-        gv_symbols,
         frame: None,
         map: HashMap::new(),
     };
@@ -322,16 +292,23 @@ pub fn translate_function(
             &[Type::I32],
         );
         let sp_new = body.add_op(wb, Operator::I32Sub, &[sp_old, c], &[Type::I32]);
-        let continuation = if let Some(limit) = m.stack_limit {
-            let required = limit
-                .checked_add(frame_size)
-                .context("shadow stack frame too large")?;
-            let minimum = body.add_op(
+        let continuation = if let Some(limit) = m.object_markers.stack_limit {
+            ensure!(frame_size < 1 << 30, "shadow stack frame too large");
+            let limit = body.add_op(
                 wb,
-                Operator::I32Const { value: required },
+                Operator::GlobalGet {
+                    global_index: limit,
+                },
                 &[],
                 &[Type::I32],
             );
+            let frame = body.add_op(
+                wb,
+                Operator::I32Const { value: frame_size },
+                &[],
+                &[Type::I32],
+            );
+            let minimum = body.add_op(wb, Operator::I32Add, &[limit, frame], &[Type::I32]);
             let overflow = body.add_op(wb, Operator::I32LtU, &[sp_old, minimum], &[Type::I32]);
             let trap = body.add_block();
             let resume = body.add_block();
