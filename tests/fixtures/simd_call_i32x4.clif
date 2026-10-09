@@ -1,0 +1,16 @@
+; entry: %main
+; run: %main(7) == 7
+; run: %main(-19) == -19
+function %identity(i32x4) -> i32x4 {
+block0(v0: i32x4):
+    return v0
+}
+
+function %main(i32) -> i32 {
+    fn0 = %identity(i32x4) -> i32x4
+block0(v0: i32):
+    v1 = splat.i32x4 v0
+    v2 = call fn0(v1)
+    v3 = extractlane.i32x4 v2, 2
+    return v3
+}

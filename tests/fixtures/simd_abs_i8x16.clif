@@ -1,0 +1,8 @@
+; wasm-run: %abs() == 3
+function %abs() -> i8 {
+block0:
+    v0 = vconst.i8x16 [-3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    v1 = iabs.i8x16 v0
+    v2 = extractlane.i8x16 v1, 0
+    return v2
+}

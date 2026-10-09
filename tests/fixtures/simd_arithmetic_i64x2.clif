@@ -1,0 +1,9 @@
+; wasm-run: %add() == 12
+function %add() -> i64 {
+block0:
+    v0 = vconst.i64x2 [5 0]
+    v1 = vconst.i64x2 [7 0]
+    v2 = iadd.i64x2 v0, v1
+    v3 = extractlane.i64x2 v2, 0
+    return v3
+}

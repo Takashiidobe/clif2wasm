@@ -1,0 +1,9 @@
+; wasm-run: %mulhi() == 1
+function %mulhi() -> i64 {
+block0:
+    v0 = vconst.i64x2 [4611686018427387904 0]
+    v1 = vconst.i64x2 [4 0]
+    v2 = umulhi.i64x2 v0, v1
+    v3 = extractlane.i64x2 v2, 0
+    return v3
+}

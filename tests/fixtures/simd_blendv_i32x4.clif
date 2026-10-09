@@ -1,0 +1,10 @@
+; wasm-run: %blend() == 9
+function %blend() -> i32 {
+block0:
+    v0 = vconst.i32x4 [-1 0 1 -2147483648]
+    v1 = vconst.i32x4 [9 9 9 9]
+    v2 = vconst.i32x4 [4 4 4 4]
+    v3 = blendv.i32x4 v0, v1, v2
+    v4 = extractlane.i32x4 v3, 0
+    return v4
+}

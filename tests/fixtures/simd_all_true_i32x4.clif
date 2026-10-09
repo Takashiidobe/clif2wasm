@@ -1,0 +1,7 @@
+; wasm-run: %all() == 0
+function %all() -> i32 {
+block0:
+    v0 = vconst.i32x4 [1 2 0 4]
+    v1 = vall_true.i32x4 v0
+    return v1
+}

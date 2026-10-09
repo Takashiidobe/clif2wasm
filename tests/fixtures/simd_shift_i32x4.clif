@@ -1,0 +1,9 @@
+; wasm-run: %shift() == 64
+function %shift() -> i32 {
+block0:
+    v0 = vconst.i32x4 [1 16 0 0]
+    v1 = vconst.i32x4 [1 2 0 0]
+    v2 = ishl.i32x4 v0, v1
+    v3 = extractlane.i32x4 v2, 1
+    return v3
+}

@@ -1,0 +1,9 @@
+; run: %insert(7) == 7
+; run: %insert(-19) == -19
+function %insert(i32) -> i32 {
+block0(v0: i32):
+    v1 = scalar_to_vector.i32x4 v0
+    v2 = insertlane.i32x4 v1, v0, 2
+    v3 = extractlane.i32x4 v2, 2
+    return v3
+}

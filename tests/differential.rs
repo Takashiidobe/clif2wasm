@@ -6,6 +6,7 @@ use cranelift_codegen::ir::{Function, Type, types};
 use cranelift_interpreter::environment::FunctionStore;
 use cranelift_interpreter::interpreter::{Interpreter, InterpreterState};
 use cranelift_interpreter::step::ControlFlow;
+use cranelift_module::{Linkage, Module as CraneliftModule};
 use cranelift_reader::{Invocation, RunCommand, parse_functions, parse_run_command};
 use wasmi::{Engine, Instance, Module, Store, Val};
 
@@ -62,16 +63,15 @@ fn run_fixture(path: &Path) {
             }
         })
         .collect::<Vec<_>>();
-    let named = functions
-        .iter()
-        .zip(&names)
-        .map(|(function, name)| clif2wasm::NamedClifFunc::new(name, function))
-        .collect::<Vec<_>>();
-    if let Some(expected) = text
+    let expected_span = text
+        .lines()
+        .find_map(|line| line.strip_prefix("; error-span:").map(str::trim));
+    let expected_error = text
         .lines()
         .find_map(|line| line.strip_prefix("; error:").map(str::trim))
-    {
-        let error = clif2wasm::translate_module_multi(&named, &[], &["test"]).expect_err(
+        .or(expected_span);
+    if let Some(expected) = expected_error {
+        let error = translate_fixture(&functions, &names, entry_index).expect_err(
             "error fixture now translates; move it to tests/fixtures and add run expectations",
         );
         let diagnostic = format!("{error:#}");
@@ -80,6 +80,31 @@ fn run_fixture(path: &Path) {
             "{}: expected diagnostic containing `{expected}`, got: {diagnostic}",
             path.display()
         );
+        if expected_span.is_some() {
+            let clif2wasm::error::Error::Unsupported {
+                code: clif2wasm::error::ErrorCode::UnsupportedOpcode,
+                source_code: Some(_),
+                span: Some(span),
+                ..
+            } = error
+            else {
+                panic!(
+                    "{}: expected an Unsupported diagnostic with a source span, got {error:?}",
+                    path.display()
+                );
+            };
+            assert!(
+                span.len() > 0,
+                "{}: diagnostic span is empty",
+                path.display()
+            );
+            assert_eq!(
+                miette::Diagnostic::code(&error).unwrap().to_string(),
+                "CLIF2WASM-E2000",
+                "{}: unstable diagnostic code",
+                path.display()
+            );
+        }
         return;
     }
     let commands = text
@@ -96,6 +121,12 @@ fn run_fixture(path: &Path) {
                     panic!("{}: invalid trap command `{line}`", path.display());
                 };
                 Some(FixtureCommand::Trap(invocation))
+            } else if let Some(run) = line.strip_prefix("; wasm-run:") {
+                let parsed = parse_run_command(&format!("; run:{run}"), &function.signature)
+                    .unwrap_or_else(|e| {
+                        panic!("reading wasm run command in {}: {e}", path.display())
+                    });
+                parsed.map(FixtureCommand::WasmRun)
             } else {
                 parse_run_command(line, &function.signature)
                     .unwrap_or_else(|e| panic!("reading run command in {}: {e}", path.display()))
@@ -109,7 +140,7 @@ fn run_fixture(path: &Path) {
         path.display()
     );
 
-    let wasm = clif2wasm::translate_module_multi(&named, &[], &["test"])
+    let wasm = translate_fixture(&functions, &names, entry_index)
         .unwrap_or_else(|e| panic!("translating {}: {e:#}", path.display()));
     let engine = Engine::default();
     let module = Module::new(&engine, &wasm)
@@ -134,6 +165,20 @@ fn run_fixture(path: &Path) {
             FixtureCommand::Run(command) => {
                 panic!("{}: unsupported print command {command}", path.display());
             }
+            FixtureCommand::WasmRun(command @ RunCommand::Run(invocation, _, _)) => {
+                let actual =
+                    execute_wasm(&engine, &module, function, &invocation.args, path, index);
+                let actual = returned(actual, "wasm", path, index);
+                command
+                    .run(|_, _| Ok(actual.clone()))
+                    .unwrap_or_else(|e| panic!("{}: wasm: {e}", path.display()));
+            }
+            FixtureCommand::WasmRun(command) => {
+                panic!(
+                    "{}: unsupported wasm print command {command}",
+                    path.display()
+                );
+            }
             FixtureCommand::Trap(invocation) => {
                 let reference = interpret(&functions, entry_name, &invocation.args);
                 let actual =
@@ -142,6 +187,34 @@ fn run_fixture(path: &Path) {
             }
         }
     }
+}
+
+fn translate_fixture(
+    functions: &[Function],
+    names: &[String],
+    entry_index: usize,
+) -> clif2wasm::error::Result<Vec<u8>> {
+    let mut module = clif2wasm::WasmModule::new()?;
+    let mut ids = Vec::with_capacity(functions.len());
+    for (index, (function, name)) in functions.iter().zip(names).enumerate() {
+        let linkage = if index == entry_index {
+            Linkage::Export
+        } else {
+            Linkage::Local
+        };
+        ids.push(
+            module
+                .declare_function(name, linkage, &function.signature)
+                .expect("declare fixture function"),
+        );
+    }
+    for (function, id) in functions.iter().zip(ids) {
+        let mut context = cranelift_codegen::Context::for_function(function.clone());
+        module
+            .define_function(id, &mut context)
+            .expect("define fixture function");
+    }
+    module.finish()
 }
 
 fn trap_command_results(function: &Function) -> String {
@@ -164,6 +237,7 @@ fn trap_command_results(function: &Function) -> String {
 
 enum FixtureCommand {
     Run(RunCommand),
+    WasmRun(RunCommand),
     Trap(Invocation),
 }
 

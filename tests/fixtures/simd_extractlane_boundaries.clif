@@ -1,0 +1,7 @@
+; run: %last_i32() == -17
+function %last_i32() -> i32 {
+block0:
+    v0 = vconst.i32x4 [10 20 30 -17]
+    v1 = extractlane.i32x4 v0, 3
+    return v1
+}

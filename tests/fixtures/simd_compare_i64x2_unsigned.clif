@@ -1,0 +1,9 @@
+; wasm-run: %greater() == 1
+function %greater() -> i32 {
+block0:
+    v0 = vconst.i64x2 [-1 1]
+    v1 = vconst.i64x2 [1 2]
+    v2 = icmp ugt v0, v1
+    v3 = vany_true.i64x2 v2
+    return v3
+}

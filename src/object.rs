@@ -17,7 +17,8 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail, ensure};
+use crate::error::{Context, Result};
+use crate::{bail, ensure};
 use cranelift_codegen::ir;
 use waffle::{FuncDecl, GlobalData, MemoryData, SignatureData, TableData, Type};
 
@@ -517,13 +518,16 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
                 }
             }
         };
-        body.validate()
-            .map_err(|e| anyhow::anyhow!("waffle validate() rejected `{}`:\n{e}", f.name))?;
+        body.validate().map_err(|e| {
+            crate::error::Error::general(format!("waffle validate() rejected `{}`:\n{e}", f.name))
+        })?;
         module.funcs[wfuncs[k]] = FuncDecl::Body(sigs[k], f.name.to_string(), body);
     }
 
     // ---- 3. compile via waffle, harvest per-function body bytes ----
-    let compiled = module.to_wasm_bytes().context("waffle backend compile")?;
+    let compiled = module.to_wasm_bytes().map_err(|error| {
+        crate::error::Error::general(format!("waffle backend compile: {error}"))
+    })?;
     let bodies = harvest_code_bodies(&compiled, defined_fn_ords.len())?;
 
     // ---- 4. assemble the object ----
@@ -865,12 +869,14 @@ fn splice_body(
     let mut out = Vec::with_capacity(body.len() + 32);
     let mut relocs = Vec::new();
     let fb = wasmparser::FunctionBody::new(wasmparser::BinaryReader::new(body, 0));
-    let mut reader = fb.get_operators_reader()?;
+    let mut reader = fb
+        .get_operators_reader()
+        .context("reading Wasm operators")?;
     let mut copied_to = 0usize; // source offset up to which bytes are flushed
     while !reader.eof() {
         let op_start = usize::try_from(reader.original_position())
             .context("instruction offset exceeds address space")?;
-        let op = reader.read()?;
+        let op = reader.read().context("reading Wasm operator")?;
         let op_end = usize::try_from(reader.original_position())
             .context("instruction end exceeds address space")?;
         match op {
@@ -880,7 +886,9 @@ fn splice_body(
                 let sym = *fn_sym_of_wasm_index
                     .get(function_index as usize)
                     .ok_or_else(|| {
-                        anyhow::anyhow!("call to unknown function index {function_index}")
+                        crate::error::Error::general(format!(
+                            "call to unknown function index {function_index}"
+                        ))
                     })?;
                 relocs.push(Reloc {
                     ty: R_WASM_FUNCTION_INDEX_LEB,

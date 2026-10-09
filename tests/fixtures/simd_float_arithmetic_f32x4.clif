@@ -1,0 +1,9 @@
+; wasm-run: %sum(0x1.0, 0x1.0) == 0x2.0
+function %sum(f32, f32) -> f32 {
+block0(v0: f32, v1: f32):
+    v2 = splat.f32x4 v0
+    v3 = splat.f32x4 v1
+    v4 = fadd.f32x4 v2, v3
+    v5 = extractlane.f32x4 v4, 2
+    return v5
+}

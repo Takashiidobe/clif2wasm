@@ -1,0 +1,7 @@
+; wasm-run: %any() == 1
+function %any() -> i32 {
+block0:
+    v0 = vconst.i32x4 [0 0 7 0]
+    v1 = vany_true.i32x4 v0
+    return v1
+}

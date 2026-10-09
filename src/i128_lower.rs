@@ -4,9 +4,10 @@
 //! for add/sub, pairwise logic, hi/lo-combined comparisons, and branchless dynamic
 //! shifts via `select`. Multiplication is deliberately left on the gap list.
 
-use anyhow::{Result, bail};
 use cranelift_codegen::ir::condcodes::IntCC;
 use waffle::{FunctionBody, Operator, Type, Value};
+
+use crate::error::{Error, Result};
 
 type Pair = (Value, Value); // (lo, hi)
 
@@ -216,7 +217,7 @@ impl ShiftKind {
             Opcode::Ishl => ShiftKind::Shl,
             Opcode::Ushr => ShiftKind::UShr,
             Opcode::Sshr => ShiftKind::SShr,
-            other => bail!("not a shift opcode: {other}"),
+            other => return Err(Error::internal(format!("not a shift opcode: {other}"))),
         })
     }
 }

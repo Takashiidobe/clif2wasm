@@ -1,0 +1,9 @@
+; wasm-run: %less() == 1
+function %less() -> i32 {
+block0:
+    v0 = vconst.i8x16 [-1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    v1 = vconst.i8x16 [1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    v2 = icmp slt v0, v1
+    v3 = vany_true.i8x16 v2
+    return v3
+}

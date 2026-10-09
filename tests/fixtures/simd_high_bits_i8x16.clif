@@ -1,0 +1,7 @@
+; wasm-run: %mask() == 43690
+function %mask() -> i16 {
+block0:
+    v0 = vconst.i8x16 [0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1]
+    v1 = vhigh_bits.i16 v0
+    return v1
+}

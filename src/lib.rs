@@ -6,21 +6,22 @@
 //! See docs/plans/cranelift-wasm-backend.md §6 ("waffle unproven for a non-wasm frontend").
 
 pub mod bridge;
+pub mod error;
 pub mod i128_lower;
-pub mod module;
-#[cfg(feature = "module-seam")]
-pub mod module_impl;
+mod module;
+mod module_impl;
+pub use module_impl::WasmModule;
 pub mod object;
 pub mod ops;
 pub mod runtime_i128;
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use crate::error::{Error, ErrorCode, Result as ClifResult};
 use cranelift_codegen::ir;
 
 /// A CLIF function plus the name it will carry in the emitted wasm module.
-pub struct NamedClifFunc<'a> {
+pub(crate) struct NamedClifFunc<'a> {
     pub name: &'a str,
     pub func: &'a ir::Function,
     /// For reader-parsed dumps only: global-value index -> the symbol identity from the
@@ -37,16 +38,11 @@ impl<'a> NamedClifFunc<'a> {
             gv_symbols: HashMap::new(),
         }
     }
-
-    pub fn with_gv_symbols(mut self, gv_symbols: HashMap<u32, String>) -> Self {
-        self.gv_symbols = gv_symbols;
-        self
-    }
 }
 
 /// A static data object to place in linear memory (what cg_clif's `define_data`
 /// would hand a real `Module` impl).
-pub struct NamedClifData<'a> {
+pub(crate) struct NamedClifData<'a> {
     pub name: &'a str,
     pub bytes: Vec<u8>,
     pub align: u32,
@@ -148,72 +144,6 @@ impl RuntimeFn {
     }
 }
 
-/// Translate a set of CLIF functions into one wasm module, exporting `export`
-/// (which must be the name of one of the functions).
-///
-/// Direct calls between the functions are resolved by `ExternalName::User { namespace: 0,
-/// index: k }` where `k` is the callee's ordinal in `funcs` (cg_clif's FuncId scheme).
-pub fn translate_module(funcs: &[NamedClifFunc], export: &str) -> Result<Vec<u8>> {
-    module::translate_module(funcs, &[], &[export])
-}
-
-/// Like [`translate_module`], with static data objects. Data refs resolve by
-/// `ExternalName::User { namespace: 1, index: k }` (cg_clif's DataId scheme) or, for
-/// reader-parsed dumps, by each function's `gv_symbols` side table matched against
-/// data names.
-pub fn translate_module_with_data(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    export: &str,
-) -> Result<Vec<u8>> {
-    module::translate_module(funcs, data, &[export])
-}
-
-/// Like [`translate_module_with_data`], exporting several functions (the Module-seam
-/// finish path exports every `Linkage::Export` function).
-pub fn translate_module_multi(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-) -> Result<Vec<u8>> {
-    module::translate_module(funcs, data, exports)
-}
-
-pub fn translate_module_with_options(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    options: TranslationOptions,
-) -> Result<Vec<u8>> {
-    module::translate_module_with_options(funcs, data, exports, options)
-}
-
-/// Full form: `runtime_overrides` marks slice positions whose bodies are synthesized
-/// runtime functions (see [`RuntimeFn`]) — the entry's CLIF contributes only its
-/// signature.
-pub fn translate_module_with_runtime(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    runtime_overrides: &HashMap<usize, RuntimeFn>,
-) -> Result<Vec<u8>> {
-    module::translate_module_impl(funcs, data, exports, runtime_overrides, &HashMap::new())
-}
-
-/// Fullest form: `imports` marks slice positions that become REAL wasm imports from
-/// the `env` module (name = map value); their CLIF entries contribute only the
-/// signature. Imported functions occupy the front of the wasm function index space,
-/// as the spec requires.
-pub fn translate_module_full(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    runtime_overrides: &HashMap<usize, RuntimeFn>,
-    imports: &HashMap<usize, String>,
-) -> Result<Vec<u8>> {
-    module::translate_module_impl(funcs, data, exports, runtime_overrides, imports)
-}
-
 /// CLIF value type -> wasm value type, for types that map to a SINGLE wasm value.
 ///
 /// i8/i16 fold to I32 — the minimum unavoidable narrow-int handling: `icmp` produces i8,
@@ -222,23 +152,36 @@ pub fn translate_module_full(
 ///
 /// i128 deliberately fails here: it maps to a PAIR of I64s and every consumer must go
 /// through `expand_type` / the pair-aware paths instead.
-pub fn map_type(ty: ir::Type) -> Result<waffle::Type> {
+pub fn map_type(ty: ir::Type) -> ClifResult<waffle::Type> {
     use cranelift_codegen::ir::types;
     Ok(match ty {
         types::I8 | types::I16 | types::I32 => waffle::Type::I32,
         types::I64 => waffle::Type::I64,
         types::F32 => waffle::Type::F32,
         types::F64 => waffle::Type::F64,
-        other => bail!("clif2wasm: unsupported CLIF type {other}"),
+        other => {
+            return Err(Error::unsupported_with_code(
+                ErrorCode::UnsupportedType,
+                format!("clif2wasm: unsupported CLIF type {other}"),
+            ));
+        }
     })
 }
 
 /// CLIF value type -> one or two wasm value types. i128 becomes (lo, hi) as 2×I64 —
 /// the plan's ABI decision (§8) applied uniformly to signatures, blockparams, branch
 /// args, returns, and call boundaries.
-pub fn expand_type(ty: ir::Type) -> Result<Vec<waffle::Type>> {
+pub fn expand_type(ty: ir::Type) -> ClifResult<Vec<waffle::Type>> {
     if ty == cranelift_codegen::ir::types::I128 {
         Ok(vec![waffle::Type::I64, waffle::Type::I64])
+    } else if ty.is_dynamic_vector() {
+        return Err(Error::unsupported_with_code(
+            ErrorCode::UnsupportedRepresentation,
+            format!("clif2wasm: dynamic CLIF vector type {ty} is unsupported"),
+        ));
+    } else if ty.is_vector() {
+        let chunks = ty.bits().div_ceil(128) as usize;
+        Ok(vec![waffle::Type::V128; chunks])
     } else {
         Ok(vec![map_type(ty)?])
     }

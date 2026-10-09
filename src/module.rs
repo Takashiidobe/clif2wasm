@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail, ensure};
+use crate::error::{Context, Result};
+use crate::{bail, ensure, unsupported};
 use cranelift_codegen::ir;
 use waffle::{
     Export, ExportKind, FuncDecl, GlobalData, MemoryData, MemorySegment, SignatureData, TableData,
@@ -20,94 +21,12 @@ const STACK_TOP: u64 = 0x1_0000;
 /// they live below the shadow stack, which grows down from STACK_TOP.
 const DATA_BASE: u32 = 0x1000;
 
-pub fn translate_module(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-) -> Result<Vec<u8>> {
-    translate_module_with_options(funcs, data, exports, crate::TranslationOptions::default())
-}
-
-pub fn translate_module_with_options(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    options: crate::TranslationOptions,
-) -> Result<Vec<u8>> {
-    translate_module_impl_with_options(
-        funcs,
-        data,
-        exports,
-        &Default::default(),
-        &Default::default(),
-        options,
-    )
-}
-
-/// `runtime_overrides`: slice positions whose BODY is synthesized (the entry's CLIF
-/// function contributes only its signature) — the named-libcall path (e.g. an
-/// undefined `memcmp` import replaced by the real byte-compare loop).
-pub fn translate_module_impl(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    runtime_overrides: &std::collections::HashMap<usize, RuntimeFn>,
-    imports: &std::collections::HashMap<usize, String>,
-) -> Result<Vec<u8>> {
-    translate_module_impl_with_options(
-        funcs,
-        data,
-        exports,
-        runtime_overrides,
-        imports,
-        crate::TranslationOptions::default(),
-    )
-}
-
-pub(crate) fn translate_module_impl_with_options(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    runtime_overrides: &std::collections::HashMap<usize, RuntimeFn>,
-    imports: &std::collections::HashMap<usize, String>,
-    options: crate::TranslationOptions,
-) -> Result<Vec<u8>> {
-    translate_module_with_layout_options(
-        funcs,
-        data,
-        exports,
-        runtime_overrides,
-        imports,
-        None,
-        options,
-    )
-}
-
 pub struct SessionLayout<'a> {
     pub data_addresses: &'a [u32],
     pub initialized_data: usize,
 }
 
-pub fn translate_module_with_layout(
-    funcs: &[NamedClifFunc],
-    data: &[NamedClifData],
-    exports: &[&str],
-    runtime_overrides: &HashMap<usize, RuntimeFn>,
-    imports: &HashMap<usize, String>,
-    layout: Option<SessionLayout<'_>>,
-) -> Result<Vec<u8>> {
-    translate_module_with_layout_options(
-        funcs,
-        data,
-        exports,
-        runtime_overrides,
-        imports,
-        layout,
-        crate::TranslationOptions::default(),
-    )
-}
-
-pub fn translate_module_with_layout_options(
+pub(crate) fn translate_module_with_layout_options(
     funcs: &[NamedClifFunc],
     data: &[NamedClifData],
     exports: &[&str],
@@ -370,7 +289,7 @@ pub fn translate_module_with_layout_options(
                 } => {
                     let ext = &nf.func.dfg.ext_funcs[*func_ref];
                     let ir::ExternalName::User(reference) = ext.name else {
-                        bail!("tail libcall unsupported")
+                        unsupported!("tail libcall unsupported")
                     };
                     let ordinal = nf.func.params.user_named_funcs()[reference].index as usize;
                     let callee = *wfuncs.get(ordinal).context("tail callee out of range")?;
@@ -470,7 +389,7 @@ pub fn translate_module_with_layout_options(
                     .with_context(|| format!("synthesizing runtime `{}`", nf.name))?
             };
             body.validate()
-                .map_err(|e| anyhow::anyhow!("runtime `{}`: {e}", nf.name))?;
+                .map_err(|e| crate::error::Error::general(format!("runtime `{}`: {e}", nf.name)))?;
             module.funcs[wfuncs[k]] = FuncDecl::Body(sigs[k], nf.name.to_string(), body);
             continue;
         }
@@ -501,12 +420,12 @@ pub fn translate_module_with_layout_options(
                 .with_context(|| format!("translating function `{}`", nf.name))
                 .and_then(|body| {
                     body.validate().map_err(|e| {
-                        anyhow::anyhow!(
+                        crate::error::Error::general(format!(
                             "waffle validate() rejected `{}`:\n{}\nCLIF was:\n{}",
                             nf.name,
                             e,
                             nf.func.display()
-                        )
+                        ))
                     })?;
                     Ok(body)
                 });
@@ -533,7 +452,7 @@ pub fn translate_module_with_layout_options(
 
     for export in exports {
         let Some(entry) = funcs.iter().position(|f| f.name == *export) else {
-            bail!("export `{export}` is not among the provided functions");
+            unsupported!("export `{export}` is not among the provided functions");
         };
         module.exports.push(Export {
             name: export.to_string(),
@@ -552,7 +471,9 @@ pub fn translate_module_with_layout_options(
         });
     }
 
-    let bytes = module.to_wasm_bytes().context("waffle backend compile")?;
+    let bytes = module.to_wasm_bytes().map_err(|error| {
+        crate::error::Error::general(format!("waffle backend compile: {error}"))
+    })?;
     crate::tail::rewrite(&bytes, tail_targets)
 }
 
@@ -566,7 +487,7 @@ fn libcall_kind(lc: ir::LibCall) -> Result<RuntimeFn> {
         ir::LibCall::Memcpy | ir::LibCall::Memmove => RuntimeFn::Memcpy,
         ir::LibCall::Memset => RuntimeFn::Memset,
         ir::LibCall::Memcmp => RuntimeFn::Memcmp,
-        other => bail!(
+        other => unsupported!(
             "unimplemented libcall {other} (float libcalls should not arise: wasm has direct ops)"
         ),
     })
@@ -658,7 +579,9 @@ pub(crate) fn synth_runtime_body(
         | RuntimeFn::Umodti3
         | RuntimeFn::Modti3
         | RuntimeFn::U128Mulo
-        | RuntimeFn::I128Mulo => bail!("{kind:?} is CLIF-synthesized, not waffle-synthesized"),
+        | RuntimeFn::I128Mulo => {
+            unsupported!("{kind:?} is CLIF-synthesized, not waffle-synthesized")
+        }
         // Handled by the early returns above.
         RuntimeFn::MemoryGrow | RuntimeFn::MemorySize => unreachable!(),
         RuntimeFn::Memcmp => {
@@ -777,9 +700,9 @@ pub(crate) fn signature_data(sig: &ir::Signature) -> Result<SignatureData> {
                     p.value_type
                 );
             }
-            other => bail!("unsupported ArgumentPurpose {other:?}"),
+            other => unsupported!("unsupported ArgumentPurpose {other:?}"),
         }
-        expand_type(p.value_type)
+        Ok(expand_type(p.value_type)?)
     };
     let mut params = Vec::new();
     for p in &sig.params {

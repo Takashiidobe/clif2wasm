@@ -1,0 +1,9 @@
+; wasm-run: %roundtrip(-7) == -7
+function %roundtrip(i32) -> i32 {
+block0(v0: i32):
+    v1 = scalar_to_vector.i32x4 v0
+    v2 = fcvt_from_sint.f32x4 v1
+    v3 = fcvt_to_sint_sat.i32x4 v2
+    v4 = extractlane.i32x4 v3, 0
+    return v4
+}

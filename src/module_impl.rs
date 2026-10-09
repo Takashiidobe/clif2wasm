@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::anyhow;
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir;
 use cranelift_codegen::isa::{self, OwnedTargetIsa, TargetIsa};
@@ -24,7 +23,8 @@ use cranelift_module::{
 };
 use target_lexicon::Triple;
 
-use crate::{NamedClifData, NamedClifFunc};
+use crate::error::{Context, Error, Result};
+use crate::{NamedClifData, NamedClifFunc, bail, unsupported};
 
 pub struct WasmModule {
     isa: OwnedTargetIsa,
@@ -33,10 +33,12 @@ pub struct WasmModule {
     declarations: ModuleDeclarations,
     funcs: BTreeMap<FuncId, ir::Function>,
     data: BTreeMap<DataId, DataDescription>,
+    translation_options: crate::TranslationOptions,
+    runtime_overrides: BTreeMap<FuncId, crate::RuntimeFn>,
     /// Undefined symbols allowed to become REAL `env` wasm imports (host-provided at
     /// instantiation — the playground's print path). From CLIF2WASM_IMPORTS
     /// (comma-separated) or `allow_import`.
-    import_symbols: std::collections::HashSet<String>,
+    import_symbols: BTreeMap<String, String>,
 }
 
 impl Clone for WasmModule {
@@ -77,25 +79,32 @@ impl Clone for WasmModule {
             initialized_data: self.initialized_data,
             funcs: self.funcs.clone(),
             data: self.data.clone(),
+            translation_options: self.translation_options,
+            runtime_overrides: self.runtime_overrides.clone(),
             import_symbols: self.import_symbols.clone(),
         }
     }
 }
 
 impl WasmModule {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Result<Self> {
         let mut fb = settings::builder();
-        fb.set("opt_level", "none")?;
+        fb.set("opt_level", "none")
+            .map_err(|e| Error::general(e.to_string()))?;
         let flags = settings::Flags::new(fb);
         let triple: Triple = "pulley32-unknown-unknown"
-            .parse()
-            .map_err(|e| anyhow!("{e}"))?;
-        let isa = isa::lookup(triple)?.finish(flags)?;
+            .parse::<Triple>()
+            .map_err(|e| Error::general(e.to_string()))?;
+        let isa = isa::lookup(triple)
+            .context("looking up Pulley32 ISA")?
+            .finish(flags)
+            .context("finishing Pulley32 ISA")?;
         let import_symbols = std::env::var("CLIF2WASM_IMPORTS")
             .map(|v| {
                 v.split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
+                    .map(|name| (name.clone(), name))
                     .collect()
             })
             .unwrap_or_default();
@@ -106,13 +115,28 @@ impl WasmModule {
             declarations: ModuleDeclarations::default(),
             funcs: BTreeMap::new(),
             data: BTreeMap::new(),
+            translation_options: crate::TranslationOptions::default(),
+            runtime_overrides: BTreeMap::new(),
             import_symbols,
         })
     }
 
     /// Allow an undefined symbol to become a real `env` wasm import.
     pub fn allow_import(&mut self, name: &str) {
-        self.import_symbols.insert(name.to_string());
+        self.allow_import_as(name, name);
+    }
+
+    pub fn allow_import_as(&mut self, symbol: &str, import_name: &str) {
+        self.import_symbols
+            .insert(symbol.to_string(), import_name.to_string());
+    }
+
+    pub fn set_translation_options(&mut self, options: crate::TranslationOptions) {
+        self.translation_options = options;
+    }
+
+    pub fn override_runtime(&mut self, function: FuncId, runtime: crate::RuntimeFn) {
+        self.runtime_overrides.insert(function, runtime);
     }
 
     /// Finalize: translate every collected function and data object into one wasm
@@ -121,7 +145,7 @@ impl WasmModule {
     /// Mirrors `ObjectModule::finish()` in shape (inherent, consumes self) — this is
     /// the method the cg_clif driver fork will call where it now calls
     /// `ObjectProduct` emission.
-    pub fn finish(self) -> anyhow::Result<Vec<u8>> {
+    pub fn finish(self) -> Result<Vec<u8>> {
         self.emit(None)
     }
 
@@ -142,8 +166,8 @@ impl WasmModule {
 
     pub fn emit_incremental(
         &mut self,
-        mut allocate: impl FnMut(usize, u32) -> anyhow::Result<u32>,
-    ) -> anyhow::Result<Vec<u8>> {
+        mut allocate: impl FnMut(usize, u32) -> Result<u32>,
+    ) -> Result<Vec<u8>> {
         for (id, _) in self
             .declarations
             .get_data_objects()
@@ -152,11 +176,11 @@ impl WasmModule {
             let data = self
                 .data
                 .get(&id)
-                .ok_or_else(|| anyhow!("undefined data {id}"))?;
+                .ok_or_else(|| Error::general(format!("undefined data {id}")))?;
             let size = match &data.init {
                 Init::Bytes { contents } => contents.len(),
                 Init::Zeros { size } => *size,
-                Init::Uninitialized => anyhow::bail!("uninitialized data {id}"),
+                Init::Uninitialized => bail!("uninitialized data {id}"),
             };
             self.data_addresses
                 .push(allocate(size, data.align.unwrap_or(8) as u32)?);
@@ -173,13 +197,13 @@ impl WasmModule {
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("fn{}", id.as_u32()));
-            self.import_symbols.insert(name);
+            self.import_symbols.insert(name.clone(), name);
         }
         self.funcs.clear();
         Ok(bytes)
     }
 
-    fn emit(&self, layout: Option<crate::module::SessionLayout<'_>>) -> anyhow::Result<Vec<u8>> {
+    fn emit(&self, layout: Option<crate::module::SessionLayout<'_>>) -> Result<Vec<u8>> {
         // Data objects, in DataId order (= namespace-1 index order).
         let mut data_objs: Vec<NamedClifData> = Vec::new();
         let mut data_names: Vec<String> = Vec::new();
@@ -198,7 +222,7 @@ impl WasmModule {
                         Init::Bytes { contents } => contents.to_vec(),
                         Init::Zeros { size } => vec![0; *size],
                         Init::Uninitialized => {
-                            anyhow::bail!("data `{}` is uninitialized", data_names[i])
+                            bail!("data `{}` is uninitialized", data_names[i])
                         }
                     };
                     // Pointer slots inside the object: resolve each reloc's target to
@@ -217,7 +241,12 @@ impl WasmModule {
                                 "clif2wasm-gap: data reloc skipped in `{}`: {e:#}",
                                 data_names[i]
                             ),
-                            Err(e) => return Err(anyhow!("data `{}`: {e}", data_names[i])),
+                            Err(e) => {
+                                return Err(Error::general(format!(
+                                    "data `{}`: {e}",
+                                    data_names[i]
+                                )));
+                            }
                         }
                     }
                     for &(offset, gv, addend) in &d.data_relocs {
@@ -231,7 +260,12 @@ impl WasmModule {
                                 "clif2wasm-gap: data reloc skipped in `{}`: {e:#}",
                                 data_names[i]
                             ),
-                            Err(e) => return Err(anyhow!("data `{}`: {e}", data_names[i])),
+                            Err(e) => {
+                                return Err(Error::general(format!(
+                                    "data `{}`: {e}",
+                                    data_names[i]
+                                )));
+                            }
                         }
                     }
                     (bytes, relocs)
@@ -246,7 +280,7 @@ impl WasmModule {
                     );
                     (vec![0u8; 64], Vec::new())
                 }
-                None => anyhow::bail!(
+                None => bail!(
                     "data `{}` declared ({:?}) but never defined — imports of data are a fork-scope gap",
                     data_names[i],
                     decl.linkage
@@ -292,8 +326,8 @@ impl WasmModule {
                 decl.signature.clone(),
             );
             build_trap_body(&mut f);
-            if self.import_symbols.contains(name) {
-                import_map.insert(i, name.clone());
+            if let Some(import_name) = self.import_symbols.get(name) {
+                import_map.insert(i, import_name.clone());
             } else if let Some(kind) = crate::RuntimeFn::from_symbol(name) {
                 runtime_overrides.insert(i, kind);
             } else if name.contains("panic") || name.ends_with("_fail") || name.ends_with("_failed")
@@ -307,8 +341,13 @@ impl WasmModule {
             which.push(Some(stub_storage.len()));
             stub_storage.push(f);
         }
+        for (i, (id, _)) in self.declarations.get_functions().enumerate() {
+            if let Some(runtime) = self.runtime_overrides.get(&id) {
+                runtime_overrides.insert(i, *runtime);
+            }
+        }
         if !missing.is_empty() {
-            anyhow::bail!(
+            unsupported!(
                 "undefined non-panic symbols (no linker yet; CLIF2WASM_LENIENT=1 to stub for sysroot builds):\n  {}",
                 missing.join("\n  ")
             );
@@ -326,13 +365,14 @@ impl WasmModule {
             }
         }
 
-        crate::module::translate_module_with_layout(
+        crate::module::translate_module_with_layout_options(
             &named,
             &data_objs,
             &exports,
             &runtime_overrides,
             &import_map,
             layout,
+            self.translation_options,
         )
     }
 
@@ -340,7 +380,7 @@ impl WasmModule {
     /// undefined, data becomes named segments, and the `linking` section carries
     /// the symbol table. No stub/import/lenient policy — resolution is the
     /// linker's job.
-    pub fn finish_object(self) -> anyhow::Result<Vec<u8>> {
+    pub fn finish_object(self) -> Result<Vec<u8>> {
         use crate::object::{ObjBinding, ObjData, ObjDataDef, ObjFunc, translate_object};
 
         fn binding_of(linkage: Linkage) -> ObjBinding {
@@ -454,7 +494,7 @@ impl WasmModule {
                         Init::Bytes { contents } => contents.to_vec(),
                         Init::Zeros { size } => vec![0; *size],
                         Init::Uninitialized => {
-                            anyhow::bail!("data `{}` is uninitialized", data_names[i])
+                            bail!("data `{}` is uninitialized", data_names[i])
                         }
                     };
                     let mut relocs = Vec::new();
@@ -509,15 +549,15 @@ impl WasmModule {
 fn reloc_target_ordinal(
     target: &cranelift_module::ModuleRelocTarget,
     expected_ns: u32,
-) -> anyhow::Result<u32> {
+) -> Result<u32> {
     match target {
         cranelift_module::ModuleRelocTarget::User { namespace, index } => {
             if *namespace != expected_ns {
-                anyhow::bail!("reloc target namespace {namespace} (expected {expected_ns})");
+                unsupported!("reloc target namespace {namespace} (expected {expected_ns})");
             }
             Ok(*index)
         }
-        other => anyhow::bail!("unsupported reloc target {other:?} (libcall/known-symbol)"),
+        other => unsupported!("unsupported reloc target {other:?} (libcall/known-symbol)"),
     }
 }
 
@@ -608,9 +648,12 @@ impl Module for WasmModule {
         _bytes: &[u8],
         _relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        Err(ModuleError::Backend(anyhow!(
-            "define_function_bytes: machine-code injection is unsupported by the wasm backend"
-        )))
+        Err(ModuleError::Backend(
+            std::io::Error::other(
+                "define_function_bytes: machine-code injection is unsupported by the wasm backend",
+            )
+            .into(),
+        ))
     }
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {

@@ -1,0 +1,10 @@
+; wasm-run: %bitselect() == 11
+function %bitselect() -> i32 {
+block0:
+    v0 = vconst.i32x4 [15 15 15 15]
+    v1 = vconst.i32x4 [10 10 10 10]
+    v2 = vconst.i32x4 [3 3 3 3]
+    v3 = bitselect.i32x4 v2, v0, v1
+    v4 = extractlane.i32x4 v3, 0
+    return v4
+}

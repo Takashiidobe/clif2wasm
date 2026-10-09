@@ -13,7 +13,8 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail, ensure};
+use crate::error::{Context, Result};
+use crate::{bail, ensure};
 use cranelift_codegen::dominator_tree::DominatorTree;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::{self, InstructionData};
@@ -22,11 +23,12 @@ use waffle::{BlockTarget, FunctionBody, Operator, Terminator, Type};
 
 use crate::{map_type, ops};
 
-/// A CLIF value's waffle representation: one wasm value, or an i128 as (lo, hi) I64s.
-#[derive(Copy, Clone, Debug)]
+/// A CLIF value's Waffle representation.
+#[derive(Clone, Debug)]
 pub enum WVal {
     One(waffle::Value),
     Pair(waffle::Value, waffle::Value),
+    Vector(Vec<waffle::Value>),
 }
 
 /// Module-level context every function translation needs.
@@ -112,7 +114,7 @@ pub struct FnCx<'a> {
 impl FnCx<'_> {
     fn get(&self, v: ir::Value) -> Result<WVal> {
         let r = self.clif.dfg.resolve_aliases(v);
-        self.map.get(&r).copied().with_context(|| {
+        self.map.get(&r).cloned().with_context(|| {
             format!("no waffle value for CLIF value {r} (use before def — irreducible or unsupported input?)")
         })
     }
@@ -122,6 +124,7 @@ impl FnCx<'_> {
         match self.get(v)? {
             WVal::One(w) => Ok(w),
             WVal::Pair(..) => bail!("i128 value used where a single wasm value is required"),
+            WVal::Vector(..) => bail!("CLIF vector used where a scalar wasm value is required"),
         }
     }
 
@@ -130,6 +133,14 @@ impl FnCx<'_> {
         match self.get(v)? {
             WVal::Pair(lo, hi) => Ok((lo, hi)),
             WVal::One(_) => bail!("non-i128 value used where an i128 pair is required"),
+            WVal::Vector(_) => bail!("CLIF vector used where an i128 pair is required"),
+        }
+    }
+
+    pub fn vector(&self, v: ir::Value) -> Result<Vec<waffle::Value>> {
+        match self.get(v)? {
+            WVal::Vector(values) => Ok(values),
+            WVal::One(_) | WVal::Pair(..) => bail!("non-vector value used as a CLIF vector"),
         }
     }
 
@@ -138,6 +149,7 @@ impl FnCx<'_> {
         Ok(match self.get(v)? {
             WVal::One(w) => vec![w],
             WVal::Pair(lo, hi) => vec![lo, hi],
+            WVal::Vector(values) => values,
         })
     }
 
@@ -149,6 +161,11 @@ impl FnCx<'_> {
     pub fn bind2(&mut self, clif_v: ir::Value, lo: waffle::Value, hi: waffle::Value) {
         self.map
             .insert(self.clif.dfg.resolve_aliases(clif_v), WVal::Pair(lo, hi));
+    }
+
+    pub fn bind_vector(&mut self, clif_v: ir::Value, values: Vec<waffle::Value>) {
+        self.map
+            .insert(self.clif.dfg.resolve_aliases(clif_v), WVal::Vector(values));
     }
 
     /// CLIF type of an alias-resolved value.
@@ -215,20 +232,30 @@ pub fn translate_function(
         let entry_wb = body.entry;
         let mut wi = 0;
         for &p in clif.dfg.block_params(entry) {
-            if clif.dfg.value_type(p) == ir::types::I128 {
+            let ty = clif.dfg.value_type(p);
+            if ty == ir::types::I128 {
                 ensure!(
                     wi + 1 < wparams.len(),
                     "entry params shorter than expanded signature"
                 );
                 cx.bind2(p, wparams[wi], wparams[wi + 1]);
                 wi += 2;
+            } else if ty.is_vector() {
+                let n = crate::expand_type(ty)?.len();
+                ensure!(
+                    wi + n <= wparams.len(),
+                    "entry params shorter than expanded signature"
+                );
+                let values = wparams[wi..wi + n].to_vec();
+                let values = ops::normalize_vector(&mut body, entry_wb, ty, values)?;
+                cx.bind_vector(p, values);
+                wi += n;
             } else {
                 ensure!(
                     wi < wparams.len(),
                     "entry params shorter than expanded signature"
                 );
                 let value = wparams[wi];
-                let ty = clif.dfg.value_type(p);
                 let value = if matches!(ty, ir::types::I8 | ir::types::I16) {
                     ops::mask_narrow(&mut body, entry_wb, value, ty)
                 } else {
@@ -258,6 +285,14 @@ pub fn translate_function(
                 let lo = body.add_blockparam(wb, Type::I64);
                 let hi = body.add_blockparam(wb, Type::I64);
                 cx.bind2(p, lo, hi);
+            } else if ty.is_vector() {
+                let types = crate::expand_type(ty)?;
+                let mut values = Vec::with_capacity(types.len());
+                for wty in types {
+                    values.push(body.add_blockparam(wb, wty));
+                }
+                let values = ops::normalize_vector(&mut body, wb, ty, values)?;
+                cx.bind_vector(p, values);
             } else {
                 let param = body.add_blockparam(wb, map_type(ty)?);
                 let wv = if matches!(ty, ir::types::I8 | ir::types::I16) {
@@ -410,7 +445,11 @@ pub fn translate_function(
                 } => {
                     let ext = &clif.dfg.ext_funcs[*func_ref];
                     let ir::ExternalName::User(reference) = ext.name else {
-                        bail!("tail libcall unsupported")
+                        return Err(crate::error::Error::unsupported("tail libcall unsupported")
+                            .at_instruction(
+                                &clif.name.to_string(),
+                                &clif.dfg.display_inst(inst).to_string(),
+                            ));
                     };
                     let ordinal = clif.params.user_named_funcs()[reference].index;
                     let marker = *m
@@ -495,8 +534,11 @@ pub fn translate_function(
                     body.set_terminator(wb, Terminator::Unreachable);
                 }
                 _ => {
+                    let instruction = clif.dfg.display_inst(inst).to_string();
+                    let function = clif.name.to_string();
                     ops::lower_inst(&mut cx, &mut body, wb, inst)
-                        .with_context(|| format!("lowering `{}`", clif.dfg.display_inst(inst)))?;
+                        .with_context(|| format!("lowering `{instruction}`"))
+                        .map_err(|error| error.at_instruction(&function, &instruction))?;
                 }
             }
         }

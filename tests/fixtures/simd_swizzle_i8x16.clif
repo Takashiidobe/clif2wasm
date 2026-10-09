@@ -1,0 +1,12 @@
+; run: %swizzle(50462976, 2) == 2
+function %swizzle(i32, i32) -> i32 {
+block0(v0: i32, v1: i32):
+    v2 = scalar_to_vector.i32x4 v0
+    v3 = bitcast.i8x16 v2
+    v4 = scalar_to_vector.i32x4 v1
+    v5 = bitcast.i8x16 v4
+    v6 = swizzle v3, v5
+    v7 = bitcast.i32x4 v6
+    v8 = extractlane.i32x4 v7, 0
+    return v8
+}

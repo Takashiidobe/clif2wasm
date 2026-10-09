@@ -1,0 +1,7 @@
+; run: %constant() == 3
+function %constant() -> i32 {
+block0:
+    v0 = vconst.i32x4 [1 2 3 4]
+    v1 = extractlane.i32x4 v0, 2
+    return v1
+}

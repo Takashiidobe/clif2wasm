@@ -1,0 +1,10 @@
+; wasm-run: %pshufb() == 16842757
+function %pshufb() -> i32 {
+block0:
+    v0 = vconst.i8x16 [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16]
+    v1 = vconst.i8x16 [4 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    v2 = x86_pshufb v0, v1
+    v3 = bitcast.i32x4 v2
+    v4 = extractlane.i32x4 v3, 0
+    return v4
+}

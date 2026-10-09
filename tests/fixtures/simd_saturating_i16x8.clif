@@ -1,0 +1,9 @@
+; wasm-run: %sat() == 32767
+function %sat() -> i16 {
+block0:
+    v0 = vconst.i16x8 [30000 0 0 0 0 0 0 0]
+    v1 = vconst.i16x8 [10000 0 0 0 0 0 0 0]
+    v2 = sadd_sat.i16x8 v0, v1
+    v3 = extractlane.i16x8 v2, 0
+    return v3
+}

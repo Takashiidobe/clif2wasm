@@ -1,0 +1,9 @@
+; wasm-run: %sum(0x1.0, 0x1.0) == 0x2.0
+function %sum(f64, f64) -> f64 {
+block0(v0: f64, v1: f64):
+    v2 = splat.f64x2 v0
+    v3 = splat.f64x2 v1
+    v4 = fadd.f64x2 v2, v3
+    v5 = extractlane.f64x2 v4, 1
+    return v5
+}

@@ -1,0 +1,9 @@
+; wasm-run: %add() == 3
+function %add() -> i8 {
+block0:
+    v0 = vconst.i8x16 [1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    v1 = vconst.i8x16 [2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    v2 = iadd.i8x16 v0, v1
+    v3 = extractlane.i8x16 v2, 0
+    return v3
+}

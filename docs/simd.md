@@ -1,16 +1,31 @@
 # SIMD support
 
-Waffle 0.5.5 supports WebAssembly SIMD through `v128` values and SIMD operators. The Wasm backend can emit these operators. The current CLIF bridge does not yet translate CLIF vector values; `map_type` accepts scalar integers and floats plus the separate i128 pair representation, and rejects vectors.
+Fixed-width CLIF vectors are represented as ordered Waffle `v128` chunks, from
+low bits to high bits. Vectors up to 128 bits use one chunk; 256-bit and
+512-bit vectors use two and four chunks. Unused bits in the final chunk are
+zeroed. Dynamic vectors are unsupported.
 
-## Planned representation
+The bridge lowers `vconst`, `scalar_to_vector`, `splat`, `insertlane`,
+`extractlane`, `shuffle`, `swizzle`, `x86_pshufb`, vector `bitcast`, vector
+`load`/`store`, widening vector loads, lane-wise add/subtract/multiply where
+Wasm has the lane operation, signed/unsigned min/max, saturating add/subtract,
+integer and float comparisons, integer absolute value, float sign-copy,
+`select`, `blendv`, `bitselect`, `iadd_pairwise`, `smulhi`/`umulhi`,
+`vany_true`, `vall_true`, and `vhigh_bits`. It also supports Wasm's vector
+float-to-integer saturating conversions, integer-to-float conversions,
+`fpromote`, and `fdemote` shapes. Operations run over the ordered v128 chunks,
+and padding bits are normalized after each result. Vector shifts and rotates
+are legalized lane by lane through scalar Wasm operators.
 
-Represent a fixed-width CLIF vector as an ordered bundle of Waffle `v128` values. Chunks run from low bits to high bits, with lane 0 in the low bits of the first chunk.
+Lane operations cover i8, i16, i32, i64, f32, and f64 where a corresponding
+Wasm SIMD operator or scalar legalization exists. `shuffle`, `swizzle`, and
+`x86_pshufb` currently require i8x16. Unsupported operations include vector
+division/remainder, i8 lane multiplication, fused multiply-add,
+and conversions with no matching Wasm operator. Dynamic vectors remain
+unsupported. Wider-vector operations that cross chunk boundaries must have a
+specific legalization; otherwise translation reports the unsupported opcode.
 
-- 64-bit vectors use one `v128`; unused high bits stay zero.
-- 128-bit vectors map directly to one `v128`.
-- 256-bit and 512-bit vectors use two or four chunks.
-- Lane-wise operations lower per chunk. Shuffles, reductions, and operations that cross chunk boundaries need dedicated legalization.
-- WebAssembly SIMD lane operations directly match i8, i16, i32, i64, f32, and f64. Other CLIF lane types need separate legalization or remain unsupported.
-- Dynamic/scalable vectors remain unsupported because Wasm `v128` has a fixed width.
-
-The error fixture `tests/fixtures/error/simd_splat_i32x4.clif` records the current unsupported behavior. When vector translation is implemented, move it to the regular fixture directory and add run expectations. The differential test runtime enables Wasmi SIMD.
+`tests/fixtures` contains differential fixtures. Use `; wasm-run:` when the
+Cranelift interpreter does not implement an instruction but Wasm execution can
+still check its expected result. Use `tests/fixtures/error` for unsupported
+translation cases.

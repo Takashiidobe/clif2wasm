@@ -1,0 +1,13 @@
+; wasm-run: %mulhi() == 65535
+function %mulhi() -> i32 {
+block0:
+    v0 = vconst.i16x8 [30000 -1 0 0 0 0 0 0]
+    v1 = vconst.i16x8 [3 -1 0 0 0 0 0 0]
+    v2 = smulhi.i16x8 v0, v1
+    v3 = umulhi.i16x8 v0, v1
+    v4 = extractlane.i16x8 v2, 0
+    v5 = extractlane.i16x8 v3, 1
+    v6 = uextend.i32 v4
+    v7 = iadd v6, v5
+    return v7
+}

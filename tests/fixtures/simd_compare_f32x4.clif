@@ -1,0 +1,9 @@
+; wasm-run: %greater(0x1.0, 0x2.0) == 1
+function %greater(f32, f32) -> i32 {
+block0(v0: f32, v1: f32):
+    v2 = splat.f32x4 v0
+    v3 = splat.f32x4 v1
+    v4 = fcmp gt v3, v2
+    v5 = vany_true.f32x4 v4
+    return v5
+}
