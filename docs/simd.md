@@ -1,31 +1,40 @@
-# SIMD support
+# SIMD
 
-Fixed-width CLIF vectors are represented as ordered Waffle `v128` chunks, from
-low bits to high bits. Vectors up to 128 bits use one chunk; 256-bit and
-512-bit vectors use two and four chunks. Unused bits in the final chunk are
-zeroed. Dynamic vectors are unsupported.
+A fixed-width CLIF vector is a list of Waffle `v128` chunks, low bits first: one
+chunk up to 128 bits, two for 256, four for 512. Unused bits in the last chunk
+are zero, and every result is re-normalized. Dynamic vectors are unsupported.
 
-The bridge lowers `vconst`, `scalar_to_vector`, `splat`, `insertlane`,
-`extractlane`, `shuffle`, `swizzle`, `x86_pshufb`, vector `bitcast`, vector
-`load`/`store`, widening vector loads, lane-wise add/subtract/multiply where
-Wasm has the lane operation, signed/unsigned min/max, saturating add/subtract,
-integer and float comparisons, integer absolute value, float sign-copy,
-`select`, `blendv`, `bitselect`, `iadd_pairwise`, `smulhi`/`umulhi`,
-`vany_true`, `vall_true`, and `vhigh_bits`. It also supports Wasm's vector
-float-to-integer saturating conversions, integer-to-float conversions,
-`fpromote`, and `fdemote` shapes. Operations run over the ordered v128 chunks,
-and padding bits are normalized after each result. Vector shifts and rotates
-are legalized lane by lane through scalar Wasm operators.
+Lane types are i8, i16, i32, i64, f32 and f64, wherever Wasm has the operator or
+a scalar legalization exists. Shifts and rotates are legalized lane by lane
+through scalar Wasm operators. `shuffle`, `swizzle` and `x86_pshufb` require
+i8x16.
 
-Lane operations cover i8, i16, i32, i64, f32, and f64 where a corresponding
-Wasm SIMD operator or scalar legalization exists. `shuffle`, `swizzle`, and
-`x86_pshufb` currently require i8x16. Unsupported operations include vector
-division/remainder, i8 lane multiplication, fused multiply-add,
-and conversions with no matching Wasm operator. Dynamic vectors remain
-unsupported. Wider-vector operations that cross chunk boundaries must have a
-specific legalization; otherwise translation reports the unsupported opcode.
+## Supported
 
-`tests/fixtures` contains differential fixtures. Use `; wasm-run:` when the
-Cranelift interpreter does not implement an instruction but Wasm execution can
-still check its expected result. Use `tests/fixtures/error` for unsupported
-translation cases.
+- Construction and lanes: `vconst`, `scalar_to_vector`, `splat`, `insertlane`,
+  `extractlane`, `shuffle`, `swizzle`, `x86_pshufb`
+- Memory: vector `load`/`store`, widening loads
+- `bitcast`, `select`, `blendv`, `bitselect`
+- Arithmetic: add, sub, mul (where Wasm has the lane op), signed/unsigned
+  min/max, saturating add/sub, integer abs, `iadd_pairwise`, `smulhi`/`umulhi`,
+  float sign-copy
+- Integer and float comparisons
+- `vany_true`, `vall_true`, `vhigh_bits`
+- Conversions: float-to-int saturating, int-to-float, `fpromote`, `fdemote`
+  (Wasm shapes only)
+
+## Unsupported
+
+Translation reports these as unsupported opcodes.
+
+- Division and remainder
+- i8 lane multiply
+- Fused multiply-add
+- Conversions with no matching Wasm operator
+- Cross-chunk operations without a specific legalization
+
+## Tests
+
+Differential fixtures live in `tests/fixtures`. Add `; wasm-run:` when the
+Cranelift interpreter lacks the instruction but Wasm execution can check the
+result. Put unsupported-translation cases in `tests/fixtures/error`.
