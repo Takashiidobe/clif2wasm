@@ -1,0 +1,6 @@
+; wasm-run: %test(65535, 2) == 1
+function %test(i16, i16) -> i16 {
+block0(v0: i16, v1: i16):
+    v2 = umulhi v0, v1
+    return v2
+}

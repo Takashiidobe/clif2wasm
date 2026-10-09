@@ -1,0 +1,6 @@
+; error: trapping fcvt to i128 is unsupported
+function %convert(f64) -> i128 {
+block0(v0: f64):
+    v1 = fcvt_to_sint.i128 v0
+    return v1
+}

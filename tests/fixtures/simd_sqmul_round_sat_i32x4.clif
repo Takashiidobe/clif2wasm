@@ -1,0 +1,9 @@
+; wasm-run: %sqmul() == 536870912
+function %sqmul() -> i32 {
+block0:
+    v0 = vconst.i32x4 [1073741824 0 0 0]
+    v1 = vconst.i32x4 [1073741824 0 0 0]
+    v2 = sqmul_round_sat.i32x4 v0, v1
+    v3 = extractlane.i32x4 v2, 0
+    return v3
+}

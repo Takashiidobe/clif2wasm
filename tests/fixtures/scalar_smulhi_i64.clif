@@ -1,0 +1,6 @@
+; wasm-run: %test(-2, 3) == -1
+function %test(i64, i64) -> i64 {
+block0(v0: i64, v1: i64):
+    v2 = smulhi v0, v1
+    return v2
+}

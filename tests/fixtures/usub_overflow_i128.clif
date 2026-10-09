@@ -1,0 +1,6 @@
+; run: %overflow(0, 1) == 1
+function %overflow(i128, i128) -> i8 {
+block0(v0: i128, v1: i128):
+    v2, v3 = usub_overflow v0, v1
+    return v3
+}

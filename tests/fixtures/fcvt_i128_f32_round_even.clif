@@ -1,0 +1,6 @@
+; wasm-run: %convert(16777217) == 0x1.0p24
+function %convert(i128) -> f32 {
+block0(v0: i128):
+    v1 = fcvt_from_uint.f32 v0
+    return v1
+}

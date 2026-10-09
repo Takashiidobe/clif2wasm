@@ -1,0 +1,7 @@
+; wasm-run: %mulhi(-1, 1) == -1
+; wasm-run: %mulhi(-18446744073709551616, 18446744073709551616) == -1
+function %mulhi(i128, i128) -> i128 {
+block0(v0: i128, v1: i128):
+    v2 = smulhi v0, v1
+    return v2
+}

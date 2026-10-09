@@ -375,7 +375,35 @@ pub fn lower_inst(
 
             // i128: pair legalization.
             if rty == types::I128 {
+                if matches!(
+                    opcode,
+                    Opcode::UaddOverflow
+                        | Opcode::SaddOverflow
+                        | Opcode::UsubOverflow
+                        | Opcode::SsubOverflow
+                ) {
+                    lower_i128_overflow(cx, body, wb, inst, opcode, args)?;
+                    return Ok(());
+                }
                 lower_binary_i128(cx, body, wb, result, opcode, args)?;
+                return Ok(());
+            }
+
+            if matches!(
+                opcode,
+                Opcode::Smin
+                    | Opcode::Umin
+                    | Opcode::Smax
+                    | Opcode::Umax
+                    | Opcode::SaddSat
+                    | Opcode::UaddSat
+                    | Opcode::SsubSat
+                    | Opcode::UsubSat
+                    | Opcode::AvgRound
+                    | Opcode::Smulhi
+                    | Opcode::Umulhi
+            ) {
+                lower_scalar_integer_special(cx, body, wb, result, opcode, args)?;
                 return Ok(());
             }
 
@@ -808,6 +836,18 @@ pub fn lower_inst(
                 }
             };
             cx.bind1(dfg.first_result(inst), wv);
+        }
+
+        InstructionData::Ternary { opcode, args }
+            if matches!(
+                opcode,
+                Opcode::UaddOverflowCin
+                    | Opcode::SaddOverflowCin
+                    | Opcode::UsubOverflowBin
+                    | Opcode::SsubOverflowBin
+            ) && dfg.value_type(dfg.first_result(inst)) == types::I128 =>
+        {
+            lower_i128_carry(cx, body, wb, inst, opcode, args)?;
         }
 
         // --- Select ---
@@ -1415,6 +1455,7 @@ fn vector_binary_operator(opcode: Opcode, lane: ir::Type) -> Result<Operator> {
         (Opcode::Umin, types::I8) => Operator::I8x16MinU,
         (Opcode::Smax, types::I8) => Operator::I8x16MaxS,
         (Opcode::Umax, types::I8) => Operator::I8x16MaxU,
+        (Opcode::AvgRound, types::I8) => Operator::I8x16AvgrU,
         (Opcode::Iadd, types::I16) => Operator::I16x8Add,
         (Opcode::Isub, types::I16) => Operator::I16x8Sub,
         (Opcode::Imul, types::I16) => Operator::I16x8Mul,
@@ -1426,6 +1467,7 @@ fn vector_binary_operator(opcode: Opcode, lane: ir::Type) -> Result<Operator> {
         (Opcode::Umin, types::I16) => Operator::I16x8MinU,
         (Opcode::Smax, types::I16) => Operator::I16x8MaxS,
         (Opcode::Umax, types::I16) => Operator::I16x8MaxU,
+        (Opcode::AvgRound, types::I16) => Operator::I16x8AvgrU,
         (Opcode::Iadd, types::I32) => Operator::I32x4Add,
         (Opcode::Isub, types::I32) => Operator::I32x4Sub,
         (Opcode::Imul, types::I32) => Operator::I32x4Mul,
@@ -1453,6 +1495,177 @@ fn vector_binary_operator(opcode: Opcode, lane: ir::Type) -> Result<Operator> {
     Ok(op)
 }
 
+fn lower_scalar_integer_special(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    result: ir::Value,
+    opcode: Opcode,
+    args: [ir::Value; 2],
+) -> Result<()> {
+    let ty = cx.vty(result);
+    ensure!(
+        matches!(ty, types::I8 | types::I16 | types::I32 | types::I64),
+        "{opcode} scalar type {ty} is unsupported"
+    );
+    let wty = map_type(ty)?;
+    let narrow = matches!(ty, types::I8 | types::I16);
+    let bits = ty.bits() as u32;
+    let mut a = cx.one(args[0])?;
+    let mut b = cx.one(args[1])?;
+    if narrow {
+        a = mask_narrow(body, wb, a, ty);
+        b = mask_narrow(body, wb, b, ty);
+    }
+    let signed = matches!(
+        opcode,
+        Opcode::Smin | Opcode::Smax | Opcode::SaddSat | Opcode::SsubSat | Opcode::Smulhi
+    );
+    if narrow && signed && !matches!(opcode, Opcode::Smulhi) {
+        a = sign_extend_narrow(body, wb, a, ty);
+        b = sign_extend_narrow(body, wb, b, ty);
+    }
+    let wv = match opcode {
+        Opcode::Smin | Opcode::Umin | Opcode::Smax | Opcode::Umax => {
+            let lt = matches!(opcode, Opcode::Smin | Opcode::Umin);
+            let cmp = match (wty, signed) {
+                (Type::I32, true) => {
+                    if lt {
+                        Operator::I32LtS
+                    } else {
+                        Operator::I32GtS
+                    }
+                }
+                (Type::I32, false) => {
+                    if lt {
+                        Operator::I32LtU
+                    } else {
+                        Operator::I32GtU
+                    }
+                }
+                (Type::I64, true) => {
+                    if lt {
+                        Operator::I64LtS
+                    } else {
+                        Operator::I64GtS
+                    }
+                }
+                (Type::I64, false) => {
+                    if lt {
+                        Operator::I64LtU
+                    } else {
+                        Operator::I64GtU
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let c = body.add_op(wb, cmp, &[a, b], &[Type::I32]);
+            body.add_op(wb, Operator::Select, &[a, b, c], &[wty])
+        }
+        Opcode::Smulhi | Opcode::Umulhi if ty != types::I64 => {
+            let (wide_ty, mul, ext_a, ext_b, shift, shr) = match ty {
+                types::I8 | types::I16 => (
+                    Type::I32,
+                    Operator::I32Mul,
+                    if ty == types::I8 {
+                        Operator::I32Extend8S
+                    } else {
+                        Operator::I32Extend16S
+                    },
+                    if ty == types::I8 {
+                        Operator::I32Extend8S
+                    } else {
+                        Operator::I32Extend16S
+                    },
+                    bits,
+                    if signed {
+                        Operator::I32ShrS
+                    } else {
+                        Operator::I32ShrU
+                    },
+                ),
+                types::I32 => (
+                    Type::I64,
+                    Operator::I64Mul,
+                    if signed {
+                        Operator::I64ExtendI32S
+                    } else {
+                        Operator::I64ExtendI32U
+                    },
+                    if signed {
+                        Operator::I64ExtendI32S
+                    } else {
+                        Operator::I64ExtendI32U
+                    },
+                    32,
+                    if signed {
+                        Operator::I64ShrS
+                    } else {
+                        Operator::I64ShrU
+                    },
+                ),
+                _ => unreachable!(),
+            };
+            if matches!(ty, types::I8 | types::I16) && !signed {
+                a = mask_narrow(body, wb, a, ty);
+                b = mask_narrow(body, wb, b, ty);
+            }
+            let x = if matches!(ty, types::I8 | types::I16) && !signed {
+                a
+            } else {
+                body.add_op(wb, ext_a, &[a], &[wide_ty])
+            };
+            let y = if matches!(ty, types::I8 | types::I16) && !signed {
+                b
+            } else {
+                body.add_op(wb, ext_b, &[b], &[wide_ty])
+            };
+            let product = body.add_op(wb, mul, &[x, y], &[wide_ty]);
+            let sh = match wide_ty {
+                Type::I32 => body.add_op(wb, Operator::I32Const { value: shift }, &[], &[wide_ty]),
+                _ => body.add_op(
+                    wb,
+                    Operator::I64Const {
+                        value: shift as u64,
+                    },
+                    &[],
+                    &[wide_ty],
+                ),
+            };
+            let high = body.add_op(wb, shr, &[product, sh], &[wide_ty]);
+            if wide_ty == Type::I64 {
+                body.add_op(wb, Operator::I32WrapI64, &[high], &[Type::I32])
+            } else {
+                high
+            }
+        }
+        Opcode::Smulhi | Opcode::Umulhi => {
+            let signed = opcode == Opcode::Smulhi;
+            let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+            let sign = body.add_op(wb, Operator::I64Const { value: 63 }, &[], &[Type::I64]);
+            let ah = if signed {
+                body.add_op(wb, Operator::I64ShrS, &[a, sign], &[Type::I64])
+            } else {
+                zero
+            };
+            let bh = if signed {
+                body.add_op(wb, Operator::I64ShrS, &[b, sign], &[Type::I64])
+            } else {
+                zero
+            };
+            i128_lower::mul(body, wb, (a, ah), (b, bh)).1
+        }
+        _ => unsupported!("scalar opcode {opcode} on {ty} is unsupported"),
+    };
+    let wv = if narrow {
+        mask_narrow(body, wb, wv, ty)
+    } else {
+        wv
+    };
+    cx.bind1(result, wv);
+    Ok(())
+}
+
 fn lower_vector_binary(
     cx: &mut FnCx,
     body: &mut FunctionBody,
@@ -1468,6 +1681,9 @@ fn lower_vector_binary(
     );
     if opcode == Opcode::IaddPairwise {
         return lower_iadd_pairwise(cx, body, wb, result, ty, args);
+    }
+    if matches!(opcode, Opcode::SqmulRoundSat | Opcode::X86Pmulhrsw) {
+        return lower_vector_sqmul_round_sat(cx, body, wb, result, ty, opcode, args);
     }
     if matches!(opcode, Opcode::Smulhi | Opcode::Umulhi) {
         return lower_vector_mulhi(cx, body, wb, result, ty, opcode, args);
@@ -1495,6 +1711,541 @@ fn lower_vector_binary(
         .collect();
     cx.bind_vector(result, normalize_vector(body, wb, ty, values)?);
     Ok(())
+}
+
+fn lower_vector_sqmul_round_sat(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    result: ir::Value,
+    ty: ir::Type,
+    opcode: Opcode,
+    args: [ir::Value; 2],
+) -> Result<()> {
+    let lane_ty = ty.lane_type();
+    ensure!(
+        matches!(lane_ty, types::I16 | types::I32),
+        "{opcode} lane type {lane_ty} is unsupported"
+    );
+    let lhs = cx.vector(args[0])?;
+    let rhs = cx.vector(args[1])?;
+    let lanes = ty.lane_count() as usize;
+    let per_chunk = (128 / lane_ty.bits()) as usize;
+    let mut output = (0..ty.bits().div_ceil(128) as usize)
+        .map(|_| body.add_op(wb, Operator::V128Const { value: 0 }, &[], &[Type::V128]))
+        .collect::<Vec<_>>();
+    for lane in 0..lanes {
+        let chunk = lane / per_chunk;
+        let index = (lane % per_chunk) as u8;
+        let extract = extract_lane_op(lane_ty, index)?;
+        let mut a = body.add_op(wb, extract, &[lhs[chunk]], &[Type::I32]);
+        let mut b = body.add_op(wb, extract, &[rhs[chunk]], &[Type::I32]);
+        if lane_ty == types::I16 {
+            a = sign_extend_narrow(body, wb, a, lane_ty);
+            b = sign_extend_narrow(body, wb, b, lane_ty);
+        }
+        let (orig_a, orig_b) = (a, b);
+        let a = body.add_op(wb, Operator::I64ExtendI32S, &[a], &[Type::I64]);
+        let b = body.add_op(wb, Operator::I64ExtendI32S, &[b], &[Type::I64]);
+        let product = body.add_op(wb, Operator::I64Mul, &[a, b], &[Type::I64]);
+        let bias = body.add_op(
+            wb,
+            Operator::I64Const {
+                value: 1u64 << (lane_ty.bits() - 2),
+            },
+            &[],
+            &[Type::I64],
+        );
+        let rounded = body.add_op(wb, Operator::I64Add, &[product, bias], &[Type::I64]);
+        let shift = body.add_op(
+            wb,
+            Operator::I64Const {
+                value: lane_ty.bits() as u64 - 1,
+            },
+            &[],
+            &[Type::I64],
+        );
+        let value = body.add_op(wb, Operator::I64ShrS, &[rounded, shift], &[Type::I64]);
+        let min = body.add_op(
+            wb,
+            Operator::I64Const {
+                value: (-(1i64 << (lane_ty.bits() - 1))) as u64,
+            },
+            &[],
+            &[Type::I64],
+        );
+        let max = body.add_op(
+            wb,
+            Operator::I64Const {
+                value: ((1i64 << (lane_ty.bits() - 1)) - 1) as u64,
+            },
+            &[],
+            &[Type::I64],
+        );
+        let under = body.add_op(wb, Operator::I64LtS, &[value, min], &[Type::I32]);
+        let clamped_low = body.add_op(wb, Operator::Select, &[min, value, under], &[Type::I64]);
+        let over = body.add_op(wb, Operator::I64GtS, &[clamped_low, max], &[Type::I32]);
+        let clamped = body.add_op(
+            wb,
+            Operator::Select,
+            &[max, clamped_low, over],
+            &[Type::I64],
+        );
+        let mut lane_value = body.add_op(wb, Operator::I32WrapI64, &[clamped], &[Type::I32]);
+        if opcode == Opcode::X86Pmulhrsw && lane_ty == types::I16 {
+            let min16 = body.add_op(
+                wb,
+                Operator::I32Const { value: 0xffff_8000 },
+                &[],
+                &[Type::I32],
+            );
+            let special_a = body.add_op(wb, Operator::I32Eq, &[orig_a, min16], &[Type::I32]);
+            let special_b = body.add_op(wb, Operator::I32Eq, &[orig_b, min16], &[Type::I32]);
+            let special = body.add_op(wb, Operator::I32And, &[special_a, special_b], &[Type::I32]);
+            lane_value = body.add_op(
+                wb,
+                Operator::Select,
+                &[min16, lane_value, special],
+                &[Type::I32],
+            );
+        }
+        if lane_ty == types::I16 {
+            lane_value = mask_narrow(body, wb, lane_value, lane_ty);
+        }
+        let dst_chunk = lane / per_chunk;
+        output[dst_chunk] = body.add_op(
+            wb,
+            replace_lane_op(lane_ty, (lane % per_chunk) as u8)?,
+            &[output[dst_chunk], lane_value],
+            &[Type::V128],
+        );
+    }
+    cx.bind_vector(result, normalize_vector(body, wb, ty, output)?);
+    Ok(())
+}
+
+fn lower_float_to_i128(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    value: waffle::Value,
+    from_f32: bool,
+    signed: bool,
+) -> Result<(waffle::Value, waffle::Value)> {
+    let value = if from_f32 {
+        body.add_op(wb, Operator::F64PromoteF32, &[value], &[Type::F64])
+    } else {
+        value
+    };
+    let zero_f = body.add_op(
+        wb,
+        Operator::F64Const {
+            value: 0.0f64.to_bits(),
+        },
+        &[],
+        &[Type::F64],
+    );
+    let nan = body.add_op(wb, Operator::F64Ne, &[value, value], &[Type::I32]);
+    let lower_bound = body.add_op(
+        wb,
+        Operator::F64Const {
+            value: (-2f64.powi(127)).to_bits(),
+        },
+        &[],
+        &[Type::F64],
+    );
+    let upper_bound = body.add_op(
+        wb,
+        Operator::F64Const {
+            value: (2f64.powi(if signed { 127 } else { 128 })).to_bits(),
+        },
+        &[],
+        &[Type::F64],
+    );
+    let below = if signed {
+        body.add_op(wb, Operator::F64Lt, &[value, lower_bound], &[Type::I32])
+    } else {
+        body.add_op(wb, Operator::F64Le, &[value, zero_f], &[Type::I32])
+    };
+    let above = body.add_op(wb, Operator::F64Ge, &[value, upper_bound], &[Type::I32]);
+    let negative = body.add_op(wb, Operator::F64Lt, &[value, zero_f], &[Type::I32]);
+    let abs = body.add_op(wb, Operator::F64Abs, &[value], &[Type::F64]);
+    let magnitude = if signed {
+        body.add_op(wb, Operator::Select, &[abs, value, negative], &[Type::F64])
+    } else {
+        value
+    };
+    let inv_scale = body.add_op(
+        wb,
+        Operator::F64Const {
+            value: (2f64.powi(-64)).to_bits(),
+        },
+        &[],
+        &[Type::F64],
+    );
+    let high_float = body.add_op(wb, Operator::F64Mul, &[magnitude, inv_scale], &[Type::F64]);
+    let high_float = body.add_op(wb, Operator::F64Trunc, &[high_float], &[Type::F64]);
+    let high = body.add_op(wb, Operator::I64TruncSatF64U, &[high_float], &[Type::I64]);
+    let high_back = body.add_op(wb, Operator::F64ConvertI64U, &[high], &[Type::F64]);
+    let scale = body.add_op(
+        wb,
+        Operator::F64Const {
+            value: (2f64.powi(64)).to_bits(),
+        },
+        &[],
+        &[Type::F64],
+    );
+    let high_scaled = body.add_op(wb, Operator::F64Mul, &[high_back, scale], &[Type::F64]);
+    let low_float = body.add_op(
+        wb,
+        Operator::F64Sub,
+        &[magnitude, high_scaled],
+        &[Type::F64],
+    );
+    let low_float = body.add_op(wb, Operator::F64Trunc, &[low_float], &[Type::F64]);
+    let low = body.add_op(wb, Operator::I64TruncSatF64U, &[low_float], &[Type::I64]);
+    let mut result = (low, high);
+    if signed {
+        let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+        let negated = i128_lower::sub(body, wb, (zero, zero), result);
+        result = (
+            body.add_op(
+                wb,
+                Operator::Select,
+                &[negated.0, result.0, negative],
+                &[Type::I64],
+            ),
+            body.add_op(
+                wb,
+                Operator::Select,
+                &[negated.1, result.1, negative],
+                &[Type::I64],
+            ),
+        );
+    }
+    let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+    let max = (
+        body.add_op(
+            wb,
+            Operator::I64Const { value: u64::MAX },
+            &[],
+            &[Type::I64],
+        ),
+        body.add_op(
+            wb,
+            Operator::I64Const {
+                value: i64::MAX as u64,
+            },
+            &[],
+            &[Type::I64],
+        ),
+    );
+    let min = (
+        zero,
+        body.add_op(
+            wb,
+            Operator::I64Const {
+                value: i64::MIN as u64,
+            },
+            &[],
+            &[Type::I64],
+        ),
+    );
+    let all_ones = (
+        body.add_op(
+            wb,
+            Operator::I64Const { value: u64::MAX },
+            &[],
+            &[Type::I64],
+        ),
+        body.add_op(
+            wb,
+            Operator::I64Const { value: u64::MAX },
+            &[],
+            &[Type::I64],
+        ),
+    );
+    let high_clamped = if signed { max } else { all_ones };
+    result = (
+        body.add_op(
+            wb,
+            Operator::Select,
+            &[high_clamped.0, result.0, above],
+            &[Type::I64],
+        ),
+        body.add_op(
+            wb,
+            Operator::Select,
+            &[high_clamped.1, result.1, above],
+            &[Type::I64],
+        ),
+    );
+    if signed {
+        result = (
+            body.add_op(
+                wb,
+                Operator::Select,
+                &[min.0, result.0, below],
+                &[Type::I64],
+            ),
+            body.add_op(
+                wb,
+                Operator::Select,
+                &[min.1, result.1, below],
+                &[Type::I64],
+            ),
+        );
+    }
+    let clear = body.add_op(wb, Operator::I32Or, &[below, nan], &[Type::I32]);
+    let clear = if signed {
+        nan
+    } else {
+        body.add_op(wb, Operator::I32Or, &[clear, negative], &[Type::I32])
+    };
+    result = (
+        body.add_op(wb, Operator::Select, &[zero, result.0, clear], &[Type::I64]),
+        body.add_op(wb, Operator::Select, &[zero, result.1, clear], &[Type::I64]),
+    );
+    Ok(result)
+}
+
+fn lower_i128_to_float(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    value: (waffle::Value, waffle::Value),
+    signed: bool,
+    to_f32: bool,
+) -> Result<waffle::Value> {
+    let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+    let zero32 = body.add_op(wb, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+    let one = body.add_op(wb, Operator::I64Const { value: 1 }, &[], &[Type::I64]);
+    let negative = if signed {
+        body.add_op(wb, Operator::I64LtS, &[value.1, zero], &[Type::I32])
+    } else {
+        body.add_op(wb, Operator::I32Const { value: 0 }, &[], &[Type::I32])
+    };
+    let magnitude = if signed {
+        let negated = i128_lower::sub(body, wb, (zero, zero), value);
+        (
+            body.add_op(
+                wb,
+                Operator::Select,
+                &[negated.0, value.0, negative],
+                &[Type::I64],
+            ),
+            body.add_op(
+                wb,
+                Operator::Select,
+                &[negated.1, value.1, negative],
+                &[Type::I64],
+            ),
+        )
+    } else {
+        value
+    };
+    let precision = if to_f32 { 24u32 } else { 53 };
+    let mantissa_bits = precision - 1;
+    let clz_hi = body.add_op(wb, Operator::I64Clz, &[magnitude.1], &[Type::I64]);
+    let clz_lo = body.add_op(wb, Operator::I64Clz, &[magnitude.0], &[Type::I64]);
+    let c127 = body.add_op(wb, Operator::I64Const { value: 127 }, &[], &[Type::I64]);
+    let c63 = body.add_op(wb, Operator::I64Const { value: 63 }, &[], &[Type::I64]);
+    let high_exp = body.add_op(wb, Operator::I64Sub, &[c127, clz_hi], &[Type::I64]);
+    let low_exp = body.add_op(wb, Operator::I64Sub, &[c63, clz_lo], &[Type::I64]);
+    let hi_zero = body.add_op(wb, Operator::I64Eqz, &[magnitude.1], &[Type::I32]);
+    let exponent = body.add_op(
+        wb,
+        Operator::Select,
+        &[low_exp, high_exp, hi_zero],
+        &[Type::I64],
+    );
+    let precision_minus_one = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: mantissa_bits as u64,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let shift_raw = body.add_op(
+        wb,
+        Operator::I64Sub,
+        &[exponent, precision_minus_one],
+        &[Type::I64],
+    );
+    let needs_shift = body.add_op(
+        wb,
+        Operator::I64GeS,
+        &[exponent, precision_minus_one],
+        &[Type::I32],
+    );
+    let shift = body.add_op(
+        wb,
+        Operator::Select,
+        &[shift_raw, zero, needs_shift],
+        &[Type::I64],
+    );
+    let shifted = i128_lower::shift(body, wb, ShiftKind::UShr, magnitude, shift)?;
+    let sig = shifted.0;
+    let shift_zero = body.add_op(wb, Operator::I64Eqz, &[shift], &[Type::I32]);
+    let guard_raw = body.add_op(wb, Operator::I64Sub, &[shift, one], &[Type::I64]);
+    let guard_shift = body.add_op(
+        wb,
+        Operator::Select,
+        &[zero, guard_raw, shift_zero],
+        &[Type::I64],
+    );
+    let guard_pair = i128_lower::shift(body, wb, ShiftKind::UShr, magnitude, guard_shift)?;
+    let guard_bit = body.add_op(wb, Operator::I64And, &[guard_pair.0, one], &[Type::I64]);
+    let guard = body.add_op(wb, Operator::I32WrapI64, &[guard_bit], &[Type::I32]);
+    let guard = body.add_op(
+        wb,
+        Operator::Select,
+        &[zero32, guard, shift_zero],
+        &[Type::I32],
+    );
+    let one_pair = (one, zero);
+    let half_bit = i128_lower::shift(body, wb, ShiftKind::Shl, one_pair, guard_shift)?;
+    let mask = i128_lower::sub(body, wb, half_bit, one_pair);
+    let discarded = i128_lower::logic(body, wb, Operator::I64And, magnitude, mask);
+    let discarded_any = body.add_op(
+        wb,
+        Operator::I64Or,
+        &[discarded.0, discarded.1],
+        &[Type::I64],
+    );
+    let sticky = body.add_op(wb, Operator::I64Ne, &[discarded_any, zero], &[Type::I32]);
+    let odd_bits = body.add_op(wb, Operator::I64And, &[sig, one], &[Type::I64]);
+    let odd = body.add_op(wb, Operator::I64Ne, &[odd_bits, zero], &[Type::I32]);
+    let sticky_or_odd = body.add_op(wb, Operator::I32Or, &[sticky, odd], &[Type::I32]);
+    let round_up = body.add_op(wb, Operator::I32And, &[guard, sticky_or_odd], &[Type::I32]);
+    let round64 = body.add_op(wb, Operator::I64ExtendI32U, &[round_up], &[Type::I64]);
+    let rounded_sig = body.add_op(wb, Operator::I64Add, &[sig, round64], &[Type::I64]);
+    let limit = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: 1u64 << precision,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let rollover = body.add_op(wb, Operator::I64GeU, &[rounded_sig, limit], &[Type::I32]);
+    let one_shift = body.add_op(wb, Operator::I64ShrU, &[rounded_sig, one], &[Type::I64]);
+    let significand = body.add_op(
+        wb,
+        Operator::Select,
+        &[one_shift, rounded_sig, rollover],
+        &[Type::I64],
+    );
+    let exponent_inc = body.add_op(wb, Operator::I64Add, &[exponent, one], &[Type::I64]);
+    let exponent = body.add_op(
+        wb,
+        Operator::Select,
+        &[exponent_inc, exponent, rollover],
+        &[Type::I64],
+    );
+    let normalized = body.add_op(
+        wb,
+        Operator::I64GeS,
+        &[exponent, precision_minus_one],
+        &[Type::I32],
+    );
+    let base = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: 1u64 << mantissa_bits,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let norm_fraction = body.add_op(wb, Operator::I64Sub, &[significand, base], &[Type::I64]);
+    let sig_clz = body.add_op(wb, Operator::I64Clz, &[significand], &[Type::I64]);
+    let sig_exp = body.add_op(wb, Operator::I64Sub, &[c63, sig_clz], &[Type::I64]);
+    let small_base = body.add_op(wb, Operator::I64Shl, &[one, sig_exp], &[Type::I64]);
+    let small_fraction = body.add_op(
+        wb,
+        Operator::I64Sub,
+        &[significand, small_base],
+        &[Type::I64],
+    );
+    let mantissa_width = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: (if to_f32 { 23 } else { 52 }) as u64,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let small_shift = body.add_op(
+        wb,
+        Operator::I64Sub,
+        &[mantissa_width, sig_exp],
+        &[Type::I64],
+    );
+    let small_fraction = body.add_op(
+        wb,
+        Operator::I64Shl,
+        &[small_fraction, small_shift],
+        &[Type::I64],
+    );
+    let fraction = body.add_op(
+        wb,
+        Operator::Select,
+        &[norm_fraction, small_fraction, normalized],
+        &[Type::I64],
+    );
+    let output_exp = body.add_op(
+        wb,
+        Operator::Select,
+        &[exponent, sig_exp, normalized],
+        &[Type::I64],
+    );
+    let bias = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: (if to_f32 { 127 } else { 1023 }) as u64,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let biased = body.add_op(wb, Operator::I64Add, &[output_exp, bias], &[Type::I64]);
+    let exp_shift = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: (if to_f32 { 23 } else { 52 }) as u64,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let exp_bits = body.add_op(wb, Operator::I64Shl, &[biased, exp_shift], &[Type::I64]);
+    let bits = body.add_op(wb, Operator::I64Or, &[exp_bits, fraction], &[Type::I64]);
+    let sign_bit = body.add_op(
+        wb,
+        Operator::I64Const {
+            value: if to_f32 { 1u64 << 31 } else { 1u64 << 63 },
+        },
+        &[],
+        &[Type::I64],
+    );
+    let sign = body.add_op(
+        wb,
+        Operator::Select,
+        &[sign_bit, zero, negative],
+        &[Type::I64],
+    );
+    let bits = body.add_op(wb, Operator::I64Or, &[bits, sign], &[Type::I64]);
+    let mag_or = body.add_op(
+        wb,
+        Operator::I64Or,
+        &[magnitude.0, magnitude.1],
+        &[Type::I64],
+    );
+    let is_zero = body.add_op(wb, Operator::I64Eqz, &[mag_or], &[Type::I32]);
+    let bits = body.add_op(wb, Operator::Select, &[zero, bits, is_zero], &[Type::I64]);
+    if to_f32 {
+        let bits = body.add_op(wb, Operator::I32WrapI64, &[bits], &[Type::I32]);
+        Ok(body.add_op(wb, Operator::F32ReinterpretI32, &[bits], &[Type::F32]))
+    } else {
+        Ok(body.add_op(wb, Operator::F64ReinterpretI64, &[bits], &[Type::F64]))
+    }
 }
 
 fn lower_vector_copysign(
@@ -2501,8 +3252,16 @@ fn lower_unary(
                 cx.bind_vector(result, normalize_vector(body, wb, dst, vec![converted])?);
                 return Ok(());
             }
+            if dst.is_vector() {
+                unsupported!("scalar saturating conversion to vector type {dst} is unsupported");
+            }
             let f64src = cx.vty(arg) == types::F64;
             let v = cx.one(arg)?;
+            if dst == types::I128 {
+                let value = lower_float_to_i128(body, wb, v, !f64src, signed)?;
+                cx.bind2(result, value.0, value.1);
+                return Ok(());
+            }
             // Wide saturating truncation first (nontrapping-fptoint).
             let wide_dst = if dst == types::I64 {
                 Type::I64
@@ -2540,7 +3299,7 @@ fn lower_unary(
                 }
                 wv = mask_narrow(body, wb, wv, dst);
             } else if dst == types::I128 {
-                unsupported!("fcvt to i128 unimplemented");
+                unsupported!("fcvt to i128 is unsupported");
             }
             cx.bind1(result, wv);
         }
@@ -2549,6 +3308,9 @@ fn lower_unary(
             // (i32/i64 destinations only; Rust `as` uses the saturating form anyway).
             let result = dfg.first_result(inst);
             let dst = dfg.value_type(result);
+            if dst == types::I128 {
+                unsupported!("trapping fcvt to i128 is unsupported");
+            }
             ensure!(
                 matches!(dst, types::I32 | types::I64),
                 "trapping fcvt to {dst} unimplemented"
@@ -2588,7 +3350,19 @@ fn lower_unary(
                 cx.bind_vector(result, normalize_vector(body, wb, dst_ty, vec![converted])?);
                 return Ok(());
             }
-            ensure!(src_ty != types::I128, "fcvt from i128 unimplemented");
+            if dst_ty.is_vector() {
+                unsupported!("scalar conversion to vector type {dst_ty} is unsupported");
+            }
+            if src_ty == types::I128 {
+                ensure!(
+                    matches!(dst_ty, types::F32 | types::F64),
+                    "fcvt from i128 to {dst_ty} is unsupported"
+                );
+                let value =
+                    lower_i128_to_float(body, wb, cx.pair(arg)?, signed, dst_ty == types::F32)?;
+                cx.bind1(result, value);
+                return Ok(());
+            }
             let mut v = cx.one(arg)?;
             // Narrow sources: canonical zext is exact for unsigned; sign-extend first
             // for signed.
@@ -2771,6 +3545,37 @@ fn lower_binary_i128(
             let (lo, hi) = i128_lower::mul(body, wb, a, b);
             cx.bind2(result, lo, hi);
         }
+        Opcode::Smulhi | Opcode::Umulhi => {
+            let (a, b) = (cx.pair(args[0])?, cx.pair(args[1])?);
+            let value = i128_lower::mulhi(body, wb, a, b, opcode == Opcode::Smulhi);
+            cx.bind2(result, value.0, value.1);
+        }
+        Opcode::Udiv | Opcode::Urem => {
+            let (a, b) = (cx.pair(args[0])?, cx.pair(args[1])?);
+            let (q, r) = i128_lower::divrem_u(body, wb, a, b);
+            let value = if opcode == Opcode::Udiv { q } else { r };
+            cx.bind2(result, value.0, value.1);
+        }
+        Opcode::Sdiv | Opcode::Srem => {
+            let (a, b) = (cx.pair(args[0])?, cx.pair(args[1])?);
+            let (q, r) = i128_lower::divrem_s(body, wb, a, b)?;
+            let value = if opcode == Opcode::Sdiv { q } else { r };
+            cx.bind2(result, value.0, value.1);
+        }
+        Opcode::Smin | Opcode::Umin | Opcode::Smax | Opcode::Umax => {
+            let (a, b) = (cx.pair(args[0])?, cx.pair(args[1])?);
+            let cond = match opcode {
+                Opcode::Smin => IntCC::SignedLessThan,
+                Opcode::Umin => IntCC::UnsignedLessThan,
+                Opcode::Smax => IntCC::SignedGreaterThan,
+                Opcode::Umax => IntCC::UnsignedGreaterThan,
+                _ => unreachable!(),
+            };
+            let choose_a = i128_lower::icmp(body, wb, cond, a, b)?;
+            let lo = body.add_op(wb, Operator::Select, &[a.0, b.0, choose_a], &[Type::I64]);
+            let hi = body.add_op(wb, Operator::Select, &[a.1, b.1, choose_a], &[Type::I64]);
+            cx.bind2(result, lo, hi);
+        }
         Opcode::Band | Opcode::Bor | Opcode::Bxor => {
             let op = match opcode {
                 Opcode::Band => Operator::I64And,
@@ -2816,10 +3621,154 @@ fn lower_binary_i128(
             cx.bind2(result, lo, hi);
         }
         other => {
-            unsupported!("unimplemented i128 binary opcode {other} (imul.i128 is a known gap)")
+            unsupported!("i128 binary opcode {other} is unsupported")
         }
     }
     Ok(())
+}
+
+fn lower_i128_overflow(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+    opcode: Opcode,
+    args: [ir::Value; 2],
+) -> Result<()> {
+    let (a, b) = (cx.pair(args[0])?, cx.pair(args[1])?);
+    let (value, overflow) = match opcode {
+        Opcode::UaddOverflow | Opcode::SaddOverflow => {
+            let (lo, hi) = i128_lower::add(body, wb, a, b);
+            let flag = if opcode == Opcode::UaddOverflow {
+                let hi0 = body.add_op(wb, Operator::I64Add, &[a.1, b.1], &[Type::I64]);
+                let hi_wrap = body.add_op(wb, Operator::I64LtU, &[hi0, a.1], &[Type::I32]);
+                let carry = body.add_op(wb, Operator::I64LtU, &[lo, a.0], &[Type::I32]);
+                let carry64 = body.add_op(wb, Operator::I64ExtendI32U, &[carry], &[Type::I64]);
+                let high = body.add_op(wb, Operator::I64Add, &[hi0, carry64], &[Type::I64]);
+                let carry_wrap = body.add_op(wb, Operator::I64LtU, &[high, hi0], &[Type::I32]);
+                body.add_op(wb, Operator::I32Or, &[hi_wrap, carry_wrap], &[Type::I32])
+            } else {
+                let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+                let sa = body.add_op(wb, Operator::I64LtS, &[a.1, zero], &[Type::I32]);
+                let sb = body.add_op(wb, Operator::I64LtS, &[b.1, zero], &[Type::I32]);
+                let sr = body.add_op(wb, Operator::I64LtS, &[hi, zero], &[Type::I32]);
+                let different = body.add_op(wb, Operator::I32Xor, &[sa, sb], &[Type::I32]);
+                let changed = body.add_op(wb, Operator::I32Xor, &[sa, sr], &[Type::I32]);
+                let same_inputs = body.add_op(wb, Operator::I32Eqz, &[different], &[Type::I32]);
+                body.add_op(wb, Operator::I32And, &[same_inputs, changed], &[Type::I32])
+            };
+            ((lo, hi), flag)
+        }
+        Opcode::UsubOverflow | Opcode::SsubOverflow => {
+            let (lo, hi) = i128_lower::sub(body, wb, a, b);
+            let flag = if opcode == Opcode::UsubOverflow {
+                i128_lower::icmp(body, wb, IntCC::UnsignedLessThan, a, b)?
+            } else {
+                let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+                let sa = body.add_op(wb, Operator::I64LtS, &[a.1, zero], &[Type::I32]);
+                let sb = body.add_op(wb, Operator::I64LtS, &[b.1, zero], &[Type::I32]);
+                let sr = body.add_op(wb, Operator::I64LtS, &[hi, zero], &[Type::I32]);
+                let different = body.add_op(wb, Operator::I32Xor, &[sa, sb], &[Type::I32]);
+                let changed = body.add_op(wb, Operator::I32Xor, &[sa, sr], &[Type::I32]);
+                body.add_op(wb, Operator::I32And, &[different, changed], &[Type::I32])
+            };
+            ((lo, hi), flag)
+        }
+        _ => unreachable!(),
+    };
+    let results = cx.clif.dfg.inst_results(inst).to_vec();
+    cx.bind2(results[0], value.0, value.1);
+    cx.bind1(results[1], overflow);
+    Ok(())
+}
+
+fn lower_i128_carry(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+    opcode: Opcode,
+    args: [ir::Value; 3],
+) -> Result<()> {
+    let a = cx.pair(args[0])?;
+    let b = cx.pair(args[1])?;
+    let input = coerce_cond(cx, body, wb, args[2])?;
+    let is_zero = body.add_op(wb, Operator::I32Eqz, &[input], &[Type::I32]);
+    let carry = body.add_op(wb, Operator::I32Eqz, &[is_zero], &[Type::I32]);
+    let zero64 = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+    let carry64 = body.add_op(wb, Operator::I64ExtendI32U, &[carry], &[Type::I64]);
+    let unit = (carry64, zero64);
+    let is_add = matches!(opcode, Opcode::UaddOverflowCin | Opcode::SaddOverflowCin);
+    let signed = matches!(opcode, Opcode::SaddOverflowCin | Opcode::SsubOverflowBin);
+    let first = if is_add {
+        i128_lower::add(body, wb, a, b)
+    } else {
+        i128_lower::sub(body, wb, a, b)
+    };
+    let value = if is_add {
+        i128_lower::add(body, wb, first, unit)
+    } else {
+        i128_lower::sub(body, wb, first, unit)
+    };
+    let of1 = if signed {
+        signed_overflow_flag(body, wb, a, b, first, is_add)
+    } else if is_add {
+        unsigned_add_overflow_flag(body, wb, a, b, first)
+    } else {
+        i128_lower::icmp(body, wb, IntCC::UnsignedLessThan, a, b)?
+    };
+    let of2 = if signed {
+        signed_overflow_flag(body, wb, first, unit, value, is_add)
+    } else if is_add {
+        unsigned_add_overflow_flag(body, wb, first, unit, value)
+    } else {
+        i128_lower::icmp(body, wb, IntCC::UnsignedLessThan, first, unit)?
+    };
+    let overflow = body.add_op(wb, Operator::I32Or, &[of1, of2], &[Type::I32]);
+    let results = cx.clif.dfg.inst_results(inst).to_vec();
+    cx.bind2(results[0], value.0, value.1);
+    cx.bind1(results[1], overflow);
+    Ok(())
+}
+
+fn signed_overflow_flag(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    a: (waffle::Value, waffle::Value),
+    b: (waffle::Value, waffle::Value),
+    result: (waffle::Value, waffle::Value),
+    add: bool,
+) -> waffle::Value {
+    let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+    let sa = body.add_op(wb, Operator::I64LtS, &[a.1, zero], &[Type::I32]);
+    let sb = body.add_op(wb, Operator::I64LtS, &[b.1, zero], &[Type::I32]);
+    let sr = body.add_op(wb, Operator::I64LtS, &[result.1, zero], &[Type::I32]);
+    let signs_ab = body.add_op(wb, Operator::I32Xor, &[sa, sb], &[Type::I32]);
+    let signs_ar = body.add_op(wb, Operator::I32Xor, &[sa, sr], &[Type::I32]);
+    if add {
+        let same = body.add_op(wb, Operator::I32Eqz, &[signs_ab], &[Type::I32]);
+        body.add_op(wb, Operator::I32And, &[same, signs_ar], &[Type::I32])
+    } else {
+        body.add_op(wb, Operator::I32And, &[signs_ab, signs_ar], &[Type::I32])
+    }
+}
+
+fn unsigned_add_overflow_flag(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    a: (waffle::Value, waffle::Value),
+    b: (waffle::Value, waffle::Value),
+    result: (waffle::Value, waffle::Value),
+) -> waffle::Value {
+    let hi0 = body.add_op(wb, Operator::I64Add, &[a.1, b.1], &[Type::I64]);
+    let hi_wrap = body.add_op(wb, Operator::I64LtU, &[hi0, a.1], &[Type::I32]);
+    let carry_lo = body.add_op(wb, Operator::I64LtU, &[result.0, a.0], &[Type::I32]);
+    let carry_lo64 = body.add_op(wb, Operator::I64ExtendI32U, &[carry_lo], &[Type::I64]);
+    let hi = body.add_op(wb, Operator::I64Add, &[hi0, carry_lo64], &[Type::I64]);
+    let carry_hi = body.add_op(wb, Operator::I64LtU, &[hi, hi0], &[Type::I32]);
+    let wraps = body.add_op(wb, Operator::I32Or, &[hi_wrap, carry_hi], &[Type::I32]);
+    let _ = result;
+    wraps
 }
 
 /// Emit a call-shaped operator and bind its (expanded, possibly multi-value) results.

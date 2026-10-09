@@ -10,6 +10,9 @@ use cranelift_module::{Linkage, Module as CraneliftModule};
 use cranelift_reader::{Invocation, RunCommand, parse_functions, parse_run_command};
 use wasmi::{Engine, Instance, Module, Store, Val};
 
+#[path = "support/fuzz.rs"]
+mod fuzz;
+
 #[test]
 fn fixtures_match_cranelift_interpreter() {
     let mut paths = Vec::new();
@@ -194,7 +197,22 @@ fn translate_fixture(
     names: &[String],
     entry_index: usize,
 ) -> clif2wasm::error::Result<Vec<u8>> {
+    translate_fixture_with_options(
+        functions,
+        names,
+        entry_index,
+        clif2wasm::TranslationOptions::default(),
+    )
+}
+
+fn translate_fixture_with_options(
+    functions: &[Function],
+    names: &[String],
+    entry_index: usize,
+    options: clif2wasm::TranslationOptions,
+) -> clif2wasm::error::Result<Vec<u8>> {
     let mut module = clif2wasm::WasmModule::new()?;
+    module.set_translation_options(options);
     let mut ids = Vec::with_capacity(functions.len());
     for (index, (function, name)) in functions.iter().zip(names).enumerate() {
         let linkage = if index == entry_index {
@@ -357,6 +375,16 @@ fn to_wasm_args(value: &DataValue) -> Vec<Val> {
         ],
         DataValue::F32(value) => vec![Val::from(value.as_f32())],
         DataValue::F64(value) => vec![Val::from(value.as_f64())],
+        DataValue::V128(value) => vec![Val::V128(wasmi::V128::from(u128::from_le_bytes(*value)))],
+        DataValue::V64(value) => vec![Val::V128(wasmi::V128::from(
+            u64::from_le_bytes(*value) as u128
+        ))],
+        DataValue::V32(value) => vec![Val::V128(wasmi::V128::from(
+            u32::from_le_bytes(*value) as u128
+        ))],
+        DataValue::V16(value) => vec![Val::V128(wasmi::V128::from(
+            u16::from_le_bytes(*value) as u128
+        ))],
         other => panic!("unsupported fixture argument {other:?}"),
     }
 }
@@ -368,6 +396,7 @@ fn wasm_result_types(ty: Type) -> Vec<Val> {
         types::I128 => vec![Val::I64(0), Val::I64(0)],
         types::F32 => vec![Val::from(0.0f32)],
         types::F64 => vec![Val::from(0.0f64)],
+        ty if ty.is_vector() && ty.bits() <= 128 => vec![Val::V128(wasmi::V128::from(0_u128))],
         other => panic!("unsupported fixture result type {other}"),
     }
 }
@@ -384,6 +413,16 @@ fn from_wasm_result(ty: Type, values: &[Val]) -> (DataValue, usize) {
         }
         (types::F32, [Val::F32(value), ..]) => (DataValue::F32(value.to_float().into()), 1),
         (types::F64, [Val::F64(value), ..]) => (DataValue::F64(value.to_float().into()), 1),
+        (ty, [Val::V128(value), ..]) if ty.is_vector() && ty.bits() <= 128 => (
+            match ty.bits() {
+                16 => DataValue::V16((value.as_u128() as u16).to_le_bytes()),
+                32 => DataValue::V32((value.as_u128() as u32).to_le_bytes()),
+                64 => DataValue::V64((value.as_u128() as u64).to_le_bytes()),
+                128 => DataValue::V128(value.as_u128().to_le_bytes()),
+                bits => panic!("unsupported wasm vector result width {bits}"),
+            },
+            1,
+        ),
         _ => panic!("wasm results do not match CLIF type {ty}: {values:?}"),
     }
 }

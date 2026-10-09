@@ -17,7 +17,7 @@ use crate::error::{Context, Result};
 use crate::{bail, ensure};
 use cranelift_codegen::dominator_tree::DominatorTree;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
-use cranelift_codegen::ir::{self, InstructionData};
+use cranelift_codegen::ir::{self, InstructionData, types};
 use waffle::entity::EntityRef;
 use waffle::{BlockTarget, FunctionBody, Operator, Terminator, Type};
 
@@ -503,7 +503,17 @@ pub fn translate_function(
                     for &v in &all[1..] {
                         values.extend(cx.expand_use(v)?);
                     }
-                    values.push(cx.one(all[0])?);
+                    let table_index = match cx.vty(all[0]) {
+                        types::I32 => cx.one(all[0])?,
+                        types::I64 => {
+                            let address = cx.one(all[0])?;
+                            body.add_op(wb, Operator::I32WrapI64, &[address], &[Type::I32])
+                        }
+                        other => {
+                            bail!("tail call callee pointer must be i32 or i64, got {other}")
+                        }
+                    };
+                    values.push(table_index);
                     if let Some(frame) = cx.frame.as_ref() {
                         body.add_op(
                             wb,

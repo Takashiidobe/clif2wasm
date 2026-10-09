@@ -1,0 +1,6 @@
+; wasm-run: %convert(-1) == -0x1.0
+function %convert(i128) -> f64 {
+block0(v0: i128):
+    v1 = fcvt_from_sint.f64 v0
+    return v1
+}

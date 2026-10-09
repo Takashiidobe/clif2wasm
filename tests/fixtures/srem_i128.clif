@@ -1,0 +1,6 @@
+; run: %rem(-100, 7) == -2
+function %rem(i128, i128) -> i128 {
+block0(v0: i128, v1: i128):
+    v2 = srem v0, v1
+    return v2
+}

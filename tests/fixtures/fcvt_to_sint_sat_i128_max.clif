@@ -1,0 +1,6 @@
+; wasm-run: %convert(0x1.0p127) == 170141183460469231731687303715884105727
+function %convert(f64) -> i128 {
+block0(v0: f64):
+    v1 = fcvt_to_sint_sat.i128 v0
+    return v1
+}
