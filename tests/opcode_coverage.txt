@@ -93,7 +93,7 @@ scalar_to_vector lowered
 sdiv lowered
 select lowered
 select_spectre_guard lowered
-sequence_point unsupported aaw.19
+sequence_point erased debug tags are dropped; waffle keeps side effects ordered (docs/machine-state.md)
 set_pinned_reg unsupported no slot for a pinned-register global (docs/machine-state.md)
 sextend lowered
 shuffle lowered

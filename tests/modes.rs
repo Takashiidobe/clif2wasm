@@ -662,6 +662,27 @@ block0(v0: i32):
 }
 
 #[test]
+fn sequence_point_is_erased_and_keeps_store_order() {
+    let mut module = WasmModule::new().unwrap();
+    let source = "function %main(i32) -> i32 {
+    ss0 = explicit_slot 4
+block0(v0: i32):
+    v1 = stack_addr.i32 ss0
+    store v0, v1
+    sequence_point
+    v2 = iconst.i32 7
+    store v2, v1
+    sequence_point
+    v3 = load.i32 v1
+    return v3
+}";
+    let main = declare(&mut module, "main", Linkage::Export, source);
+    define(&mut module, main, source);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 9), 7);
+}
+
+#[test]
 fn get_stack_pointer_tracks_the_shadow_stack() {
     let mut module = WasmModule::new().unwrap();
     let source = "function %main(i32) -> i32 {

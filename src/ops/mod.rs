@@ -416,7 +416,7 @@ pub fn lower_inst(
         InstructionData::CallIndirect { .. } => lower_call_indirect(cx, body, wb, inst)?,
 
         InstructionData::NullAry {
-            opcode: Opcode::Debugtrap,
+            opcode: Opcode::Debugtrap | Opcode::SequencePoint,
         } => {}
         InstructionData::NullAry {
             opcode: Opcode::GetStackPointer,
