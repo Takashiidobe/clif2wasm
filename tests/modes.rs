@@ -395,3 +395,115 @@ fn thread_local_data_declarations_are_rejected() {
     let anonymous = module.declare_anonymous_data(true, true);
     assert!(anonymous.unwrap_err().to_string().contains("thread-local"));
 }
+
+#[test]
+fn try_call_without_handlers_is_a_call_and_branch() {
+    let mut module = WasmModule::new().unwrap();
+    let inc_src = "function %inc(i32) -> i32 {
+block0(v0: i32):
+    v1 = iadd v0, v0
+    return v1
+}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = (i32) -> i32
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    try_call fn0(v0), sig0, block1(v0, ret0), [ context v0 ]
+block1(v1: i32, v2: i32):
+    v3 = iadd v1, v2
+    return v3
+}";
+    let inc = declare(&mut module, "inc", Linkage::Local, inc_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, inc, inc_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 300), 900);
+}
+
+#[test]
+fn try_call_indirect_without_handlers_is_a_call_and_branch() {
+    let mut module = WasmModule::new().unwrap();
+    let inc_src = "function %inc(i32) -> i32 {
+block0(v0: i32):
+    v1 = iadd v0, v0
+    return v1
+}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = (i32) -> i32
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    v1 = func_addr.i32 fn0
+    try_call_indirect v1(v0), sig0, block1(ret0), []
+block1(v2: i32):
+    return v2
+}";
+    let inc = declare(&mut module, "inc", Linkage::Local, inc_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, inc, inc_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 300), 600);
+}
+
+#[test]
+#[ignore = "portal-pc-waffle 0.5.5 stores multi-output operator results in reverse order"]
+fn multi_value_call_results_keep_their_order() {
+    let mut module = WasmModule::new().unwrap();
+    let pair_src = "function %pair(i32) -> i32, i8 {
+block0(v0: i32):
+    v1 = iadd v0, v0
+    v2 = ireduce.i8 v0
+    return v1, v2
+}";
+    let direct_src = "function %direct(i32) -> i32 {
+    sig0 = (i32) -> i32, i8
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    v1, v2 = call fn0(v0)
+    v3 = uextend.i32 v2
+    v4 = iadd v1, v3
+    return v4
+}";
+    let try_src = "function %tried(i32) -> i32 {
+    sig0 = (i32) -> i32, i8
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    try_call fn0(v0), sig0, block1(ret1, ret0), []
+block1(v1: i8, v2: i32):
+    v3 = uextend.i32 v1
+    v4 = iadd v2, v3
+    return v4
+}";
+    let pair = declare(&mut module, "pair", Linkage::Local, pair_src);
+    let direct = declare(&mut module, "direct", Linkage::Export, direct_src);
+    let tried = declare(&mut module, "tried", Linkage::Export, try_src);
+    define(&mut module, pair, pair_src);
+    define(&mut module, direct, direct_src);
+    define(&mut module, tried, try_src);
+    let bytes = module.finish().unwrap();
+    // pair(300) = (600, 300 as i8 = 44)
+    assert_eq!(run_i32(&bytes, "direct", 300), 644);
+    assert_eq!(run_i32(&bytes, "tried", 300), 644);
+}
+
+#[test]
+fn try_call_with_handlers_is_rejected() {
+    for table in ["[ tag0: block2(exn0) ]", "[ default: block2(exn0) ]"] {
+        let message = translate_error(&format!(
+            "function %main(i32) -> i32 {{
+    sig0 = (i32) -> i32
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    try_call fn0(v0), sig0, block1(ret0), {table}
+block1(v1: i32):
+    return v1
+block2(v2: i64):
+    v3 = iconst.i32 0
+    return v3
+}}"
+        ));
+        assert!(message.contains("CLIF2WASM-E2000"), "{message}");
+        assert!(message.contains("exception handlers"), "{message}");
+    }
+}

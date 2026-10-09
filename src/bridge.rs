@@ -352,13 +352,13 @@ pub fn translate_function(
         for inst in clif.layout.block_insts(block) {
             match &clif.dfg.insts[inst] {
                 InstructionData::Jump { destination, .. } => {
-                    let target = block_target(&cx, &bmap, destination)?;
+                    let target = block_target(&cx, &bmap, destination, &[])?;
                     body.set_terminator(wb, Terminator::Br { target });
                 }
                 InstructionData::Brif { arg, blocks, .. } => {
                     let cond = ops::coerce_cond(&cx, &mut body, wb, *arg)?;
-                    let if_true = block_target(&cx, &bmap, &blocks[0])?;
-                    let if_false = block_target(&cx, &bmap, &blocks[1])?;
+                    let if_true = block_target(&cx, &bmap, &blocks[0], &[])?;
+                    let if_false = block_target(&cx, &bmap, &blocks[1], &[])?;
                     body.set_terminator(
                         wb,
                         Terminator::CondBr {
@@ -372,11 +372,11 @@ pub fn translate_function(
                     // wasm br_table (waffle Terminator::Select) has CLIF br_table's
                     // exact semantics: index into targets, out-of-range -> default.
                     let jt = &clif.dfg.jump_tables[*table];
-                    let default = block_target(&cx, &bmap, &jt.default_block())?;
+                    let default = block_target(&cx, &bmap, &jt.default_block(), &[])?;
                     let targets = jt
                         .as_slice()
                         .iter()
-                        .map(|bc| block_target(&cx, &bmap, bc))
+                        .map(|bc| block_target(&cx, &bmap, bc, &[]))
                         .collect::<Result<Vec<_>>>()?;
                     let raw = cx.one(*arg)?;
                     let value = match crate::map_type(cx.vty(*arg))? {
@@ -455,6 +455,14 @@ pub fn translate_function(
                         },
                     );
                 }
+                InstructionData::TryCall { .. } | InstructionData::TryCallIndirect { .. } => {
+                    let instruction = clif.dfg.display_inst(inst).to_string();
+                    let function = clif.name.to_string();
+                    let target = ops::lower_try_call(&mut cx, &mut body, wb, inst, &bmap)
+                        .with_context(|| format!("lowering `{instruction}`"))
+                        .map_err(|error| error.at_instruction(&function, &instruction))?;
+                    body.set_terminator(wb, Terminator::Br { target });
+                }
                 InstructionData::Trap { .. } => {
                     body.set_terminator(wb, Terminator::Unreachable);
                 }
@@ -504,10 +512,11 @@ fn layout_frame(clif: &ir::Function, cx: &mut FnCx) -> Result<u32> {
     Ok(frame_size)
 }
 
-fn block_target(
+pub(crate) fn block_target(
     cx: &FnCx,
     bmap: &HashMap<ir::Block, waffle::Block>,
     bc: &ir::BlockCall,
+    call_returns: &[Vec<waffle::Value>],
 ) -> Result<BlockTarget> {
     let pool = &cx.clif.dfg.value_lists;
     let block = *bmap
@@ -517,7 +526,16 @@ fn block_target(
     for a in bc.args(pool) {
         match a {
             ir::BlockArg::Value(v) => args.extend(cx.expand_use(v)?),
-            other => bail!("unsupported block argument {other:?} (try_call is out of scope)"),
+            ir::BlockArg::TryCallRet(i) => args.extend(
+                call_returns
+                    .get(i as usize)
+                    .with_context(|| format!("try_call return index {i} out of range"))?
+                    .iter()
+                    .copied(),
+            ),
+            ir::BlockArg::TryCallExn(i) => {
+                bail!("exception payload exn{i} is only valid on an exception edge")
+            }
         }
     }
     Ok(BlockTarget { block, args })

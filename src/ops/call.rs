@@ -6,6 +6,55 @@ use waffle::{FunctionBody, Operator, Type, ValueDef};
 use super::*;
 use crate::bridge::FnCx;
 
+/// Emit a call-shaped operator; returns each CLIF result as its (expanded, normalized)
+/// wasm values.
+pub(crate) fn emit_call(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    op: Operator,
+    wargs: &[waffle::Value],
+    result_types: &[ir::Type],
+) -> Result<Vec<Vec<waffle::Value>>> {
+    let mut tys = Vec::new();
+    let mut widths = Vec::new();
+    for &ty in result_types {
+        let expanded = crate::expand_type(ty)?;
+        widths.push(expanded.len());
+        tys.extend(expanded);
+    }
+    let call = body.add_op(wb, op, wargs, &tys);
+    let flat = match tys.len() {
+        0 => Vec::new(),
+        1 => vec![call],
+        // Multi-value: waffle models the call as one tuple-typed value; each wasm-level
+        // result is a PickOutput projection (risk probe: external builders plausibly
+        // never exercised this path).
+        _ => tys
+            .iter()
+            .enumerate()
+            .map(|(idx, &ty)| {
+                let pv = body.add_value(ValueDef::PickOutput(call, idx as u32, ty));
+                body.append_to_block(wb, pv);
+                pv
+            })
+            .collect(),
+    };
+    let mut groups = Vec::new();
+    let mut at = 0;
+    for (&ty, &w) in result_types.iter().zip(&widths) {
+        let chunk = flat[at..at + w].to_vec();
+        at += w;
+        groups.push(if ty.is_vector() {
+            normalize_vector(body, wb, ty, chunk)?
+        } else if matches!(ty, types::I8 | types::I16) {
+            vec![mask_narrow(body, wb, chunk[0], ty)]
+        } else {
+            chunk
+        });
+    }
+    Ok(groups)
+}
+
 /// Emit a call-shaped operator and bind its (expanded, possibly multi-value) results.
 pub(super) fn bind_call_results(
     cx: &mut FnCx,
@@ -16,63 +65,15 @@ pub(super) fn bind_call_results(
     wargs: &[waffle::Value],
 ) -> Result<()> {
     let results: Vec<ir::Value> = cx.clif.dfg.inst_results(inst).to_vec();
-    // Flatten result types (i128 -> 2xI64).
-    let mut tys = Vec::new();
-    let mut widths = Vec::new(); // wasm values per CLIF result
-    for &r in &results {
-        let expanded = crate::expand_type(cx.clif.dfg.value_type(r))?;
-        widths.push(expanded.len());
-        tys.extend(expanded);
-    }
-    let call = body.add_op(wb, op, wargs, &tys);
-    match tys.len() {
-        0 => {}
-        1 => {
-            let ty = cx.clif.dfg.value_type(results[0]);
-            if ty.is_vector() {
-                cx.bind_vector(results[0], normalize_vector(body, wb, ty, vec![call])?);
-            } else {
-                let value = if matches!(ty, types::I8 | types::I16) {
-                    mask_narrow(body, wb, call, ty)
-                } else {
-                    call
-                };
-                cx.bind1(results[0], value);
-            }
-        }
-        // Multi-value: waffle models the call as one tuple-typed value; each wasm-level
-        // result is a PickOutput projection (risk probe: external builders plausibly
-        // never exercised this path).
-        _ => {
-            let mut idx = 0u32;
-            for (&r, &w) in results.iter().zip(widths.iter()) {
-                let mut picked = Vec::new();
-                for _ in 0..w {
-                    let ty = tys[idx as usize];
-                    let pv = body.add_value(ValueDef::PickOutput(call, idx, ty));
-                    body.append_to_block(wb, pv);
-                    picked.push(pv);
-                    idx += 1;
-                }
-                if cx.clif.dfg.value_type(r).is_vector() {
-                    let ty = cx.clif.dfg.value_type(r);
-                    cx.bind_vector(r, normalize_vector(body, wb, ty, picked)?);
-                } else {
-                    match w {
-                        1 => {
-                            let ty = cx.clif.dfg.value_type(r);
-                            let value = if matches!(ty, types::I8 | types::I16) {
-                                mask_narrow(body, wb, picked[0], ty)
-                            } else {
-                                picked[0]
-                            };
-                            cx.bind1(r, value)
-                        }
-                        2 => cx.bind2(r, picked[0], picked[1]),
-                        _ => bail!("unexpected result width {w}"),
-                    }
-                }
-            }
+    let types: Vec<ir::Type> = results.iter().map(|&r| cx.vty(r)).collect();
+    let groups = emit_call(body, wb, op, wargs, &types)?;
+    for ((&r, ty), values) in results.iter().zip(types).zip(groups) {
+        if ty.is_vector() {
+            cx.bind_vector(r, values);
+        } else if values.len() == 2 {
+            cx.bind2(r, values[0], values[1]);
+        } else {
+            cx.bind1(r, values[0]);
         }
     }
     Ok(())
@@ -212,22 +213,13 @@ pub(super) fn lower_call(
     Ok(())
 }
 
-pub(super) fn lower_call_indirect(
-    cx: &mut FnCx,
+fn indirect_call_parts(
+    cx: &FnCx,
     body: &mut FunctionBody,
     wb: waffle::Block,
-    inst: ir::Inst,
-) -> Result<()> {
-    let dfg = &cx.clif.dfg;
-    let InstructionData::CallIndirect {
-        opcode: Opcode::CallIndirect,
-        args,
-        sig_ref,
-    } = dfg.insts[inst]
-    else {
-        unreachable!("lower_call_indirect dispatched on a non-matching instruction")
-    };
-    let all = args.as_slice(&dfg.value_lists);
+    all: &[ir::Value],
+    sig_ref: ir::SigRef,
+) -> Result<(Operator, Vec<waffle::Value>)> {
     ensure!(!all.is_empty(), "call_indirect with no callee operand");
     let callee_ptr = all[0];
     let table_index = match cx.vty(callee_ptr) {
@@ -252,6 +244,86 @@ pub(super) fn lower_call_indirect(
         sig_index,
         table_index: cx.m.table,
     };
+    Ok((op, wargs))
+}
+
+pub(super) fn lower_call_indirect(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+) -> Result<()> {
+    let dfg = &cx.clif.dfg;
+    let InstructionData::CallIndirect {
+        opcode: Opcode::CallIndirect,
+        args,
+        sig_ref,
+    } = dfg.insts[inst]
+    else {
+        unreachable!("lower_call_indirect dispatched on a non-matching instruction")
+    };
+    let (op, wargs) = indirect_call_parts(cx, body, wb, args.as_slice(&dfg.value_lists), sig_ref)?;
     bind_call_results(cx, body, wb, inst, op, &wargs)?;
     Ok(())
+}
+
+/// `try_call` / `try_call_indirect` are terminators. Only tables without handlers are
+/// lowered: an exception can't be caught, so this is a call followed by a branch to the
+/// normal-return block, with `retN` block arguments bound to the call's results.
+pub(crate) fn lower_try_call(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+    bmap: &std::collections::HashMap<ir::Block, waffle::Block>,
+) -> Result<waffle::BlockTarget> {
+    let dfg = &cx.clif.dfg;
+    let (exception, call) = match dfg.insts[inst] {
+        InstructionData::TryCall {
+            args,
+            func_ref,
+            exception,
+            ..
+        } => {
+            let (_, callee) = resolve_callee(cx, func_ref)?;
+            let mut wargs = Vec::new();
+            for &v in args.as_slice(&dfg.value_lists) {
+                wargs.extend(cx.expand_use(v)?);
+            }
+            (
+                exception,
+                (
+                    Operator::Call {
+                        function_index: callee,
+                    },
+                    wargs,
+                ),
+            )
+        }
+        InstructionData::TryCallIndirect {
+            args, exception, ..
+        } => {
+            let sig = dfg.exception_tables[exception].signature();
+            (
+                exception,
+                indirect_call_parts(cx, body, wb, args.as_slice(&dfg.value_lists), sig)?,
+            )
+        }
+        _ => unreachable!("lower_try_call dispatched on a non-matching instruction"),
+    };
+    let table = &dfg.exception_tables[exception];
+    if table.items().any(|item| {
+        matches!(
+            item,
+            ir::ExceptionTableItem::Tag(..) | ir::ExceptionTableItem::Default(..)
+        )
+    }) {
+        unsupported!(
+            "try_call with exception handlers is unsupported: the waffle IR has no wasm exception-handling operators"
+        );
+    }
+    let sig = &dfg.signatures[table.signature()];
+    let return_types: Vec<ir::Type> = sig.returns.iter().map(|r| r.value_type).collect();
+    let rets = emit_call(body, wb, call.0, &call.1, &return_types)?;
+    crate::bridge::block_target(cx, bmap, table.normal_return(), &rets)
 }
