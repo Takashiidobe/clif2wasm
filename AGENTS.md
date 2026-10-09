@@ -126,3 +126,22 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Documentation
+
+Maintainer docs live in `docs/`; the work to write them is epic `clif2wasm-boo` (`bd show clif2wasm-boo`). Until a doc exists, its bead is the spec.
+
+| Doc | Read before changing |
+|---|---|
+| `docs/architecture.md` | anything: pipeline and which file owns what |
+| `docs/relocatable-form.md` | `relocatable.rs`, `link.rs`, `object.rs`: symbol order, markers, relocs, table policy |
+| `docs/memory-and-modes.md` | memory layout, shadow stack, whole-module vs object vs session behavior |
+| `docs/testing.md` | adding or running tests and fixtures |
+| `docs/i128.md`, `docs/simd.md`, `docs/stack-operations.md` | the matching lowering in `ops.rs`/`i128_lower.rs` |
+
+Workflow:
+
+1. Read the relevant doc before editing the code it covers.
+2. If a change alters an invariant a doc states, update that doc in the same commit.
+3. Keep docs to one page: invariants, ownership, and why. No narration of code, no TODO lists (use `bd`).
+4. If code and doc disagree, the code is the truth for now: fix the doc and say so in the commit.
