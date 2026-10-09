@@ -1,0 +1,15 @@
+; entry: %main
+; run: %main(41) == 42
+function %helper(i32) -> i32 {
+block0(v0: i32):
+    v1 = iconst.i32 1
+    v2 = iadd v0, v1
+    return v2
+}
+
+function %main(i32) -> i32 {
+    fn0 = %helper(i32) -> i32
+block0(v0: i32):
+    v1 = call fn0(v0)
+    return v1
+}

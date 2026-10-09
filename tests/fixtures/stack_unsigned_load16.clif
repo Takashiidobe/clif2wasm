@@ -1,0 +1,11 @@
+; run: %load() == 33023
+function %load() -> i32 {
+    ss0 = explicit_slot 4
+
+block0:
+    v0 = stack_addr.i32 ss0
+    v1 = iconst.i32 33023
+    store.i32 v1, v0
+    v2 = uload16.i32 v0
+    return v2
+}

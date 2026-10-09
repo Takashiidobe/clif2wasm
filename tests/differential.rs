@@ -6,7 +6,7 @@ use cranelift_codegen::ir::{Function, Type, types};
 use cranelift_interpreter::environment::FunctionStore;
 use cranelift_interpreter::interpreter::{Interpreter, InterpreterState};
 use cranelift_interpreter::step::ControlFlow;
-use cranelift_reader::{RunCommand, parse_functions, parse_run_command};
+use cranelift_reader::{Invocation, RunCommand, parse_functions, parse_run_command};
 use wasmi::{Engine, Instance, Module, Store, Val};
 
 #[test]
@@ -37,75 +37,153 @@ fn run_fixture(path: &Path) {
     let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let functions =
         parse_functions(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
-    assert_eq!(
-        functions.len(),
-        1,
-        "{}: expected one function",
-        path.display()
-    );
-    let function = &functions[0];
+    assert!(!functions.is_empty(), "{}: no functions", path.display());
+    let default_entry = functions[0].name.to_string();
+    let entry_name = text
+        .lines()
+        .find_map(|line| line.strip_prefix("; entry:").map(str::trim))
+        .unwrap_or(&default_entry);
+    let (entry_index, function) = functions
+        .iter()
+        .enumerate()
+        .find(|(_, function)| function.name.to_string() == entry_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: entry function `{entry_name}` not found",
+                path.display()
+            )
+        });
+    let names = (0..functions.len())
+        .map(|index| {
+            if index == entry_index {
+                "test".to_owned()
+            } else {
+                format!("fixture_{index}")
+            }
+        })
+        .collect::<Vec<_>>();
+    let named = functions
+        .iter()
+        .zip(&names)
+        .map(|(function, name)| clif2wasm::NamedClifFunc::new(name, function))
+        .collect::<Vec<_>>();
+    if let Some(expected) = text
+        .lines()
+        .find_map(|line| line.strip_prefix("; error:").map(str::trim))
+    {
+        let error = clif2wasm::translate_module_multi(&named, &[], &["test"])
+            .expect_err("error fixture unexpectedly translated");
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains(expected),
+            "{}: expected diagnostic containing `{expected}`, got: {diagnostic}",
+            path.display()
+        );
+        return;
+    }
     let commands = text
         .lines()
-        .map(|line| parse_run_command(line, &function.signature))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|e| panic!("reading run commands in {}: {e}", path.display()))
-        .into_iter()
-        .flatten()
+        .filter_map(|line| {
+            if let Some(trap) = line.strip_prefix("; trap:") {
+                let expected = trap_command_results(function);
+                let parsed =
+                    parse_run_command(&format!("; run:{trap} == {expected}"), &function.signature)
+                        .unwrap_or_else(|e| {
+                            panic!("reading trap command in {}: {e}", path.display())
+                        });
+                let Some(RunCommand::Run(invocation, _, _)) = parsed else {
+                    panic!("{}: invalid trap command `{line}`", path.display());
+                };
+                Some(FixtureCommand::Trap(invocation))
+            } else {
+                parse_run_command(line, &function.signature)
+                    .unwrap_or_else(|e| panic!("reading run command in {}: {e}", path.display()))
+                    .map(FixtureCommand::Run)
+            }
+        })
         .collect::<Vec<_>>();
     assert!(
         !commands.is_empty(),
-        "{}: no `; run:` commands",
+        "{}: no `; run:` or `; trap:` commands",
         path.display()
     );
 
-    let named = [clif2wasm::NamedClifFunc::new("test", function)];
-    let wasm = clif2wasm::translate_module(&named, "test")
+    let wasm = clif2wasm::translate_module_multi(&named, &[], &["test"])
         .unwrap_or_else(|e| panic!("translating {}: {e:#}", path.display()));
     let engine = Engine::default();
     let module = Module::new(&engine, &wasm)
         .unwrap_or_else(|e| panic!("validating wasm from {}: {e}", path.display()));
 
     for (index, command) in commands.iter().enumerate() {
-        let RunCommand::Run(invocation, _, _) = command else {
-            panic!(
-                "{}: use `run:` commands with expected results",
-                path.display()
-            );
-        };
-        let reference = interpret(function, &invocation.args, path, index);
-        let actual = execute_wasm(&engine, &module, function, &invocation.args, path, index);
-        assert_values_equal(&reference, &actual, path, index, "interpreter vs wasm");
-        command
-            .run(|_, _| Ok(reference.clone()))
-            .unwrap_or_else(|e| panic!("{}: interpreter: {e}", path.display()));
-        command
-            .run(|_, _| Ok(actual.clone()))
-            .unwrap_or_else(|e| panic!("{}: wasm: {e}", path.display()));
+        match command {
+            FixtureCommand::Run(command @ RunCommand::Run(invocation, _, _)) => {
+                let reference = interpret(&functions, entry_name, &invocation.args);
+                let actual =
+                    execute_wasm(&engine, &module, function, &invocation.args, path, index);
+                let reference = returned(reference, "Cranelift interpreter", path, index);
+                let actual = returned(actual, "wasm", path, index);
+                assert_values_equal(&reference, &actual, path, index, "interpreter vs wasm");
+                command
+                    .run(|_, _| Ok(reference.clone()))
+                    .unwrap_or_else(|e| panic!("{}: interpreter: {e}", path.display()));
+                command
+                    .run(|_, _| Ok(actual.clone()))
+                    .unwrap_or_else(|e| panic!("{}: wasm: {e}", path.display()));
+            }
+            FixtureCommand::Run(command) => {
+                panic!("{}: unsupported print command {command}", path.display());
+            }
+            FixtureCommand::Trap(invocation) => {
+                let reference = interpret(&functions, entry_name, &invocation.args);
+                let actual =
+                    execute_wasm(&engine, &module, function, &invocation.args, path, index);
+                assert_trapped(reference, actual, path, index);
+            }
+        }
     }
 }
 
-fn interpret(function: &Function, args: &[DataValue], path: &Path, case: usize) -> Vec<DataValue> {
-    let mut functions = FunctionStore::default();
-    functions.add("test".to_owned(), function);
-    let state = InterpreterState::default().with_function_store(functions);
+fn trap_command_results(function: &Function) -> String {
+    let values = function
+        .signature
+        .returns
+        .iter()
+        .map(|ret| match ret.value_type {
+            types::F32 | types::F64 => "0.0".to_owned(),
+            types::I8 | types::I16 | types::I32 | types::I64 | types::I128 => "0".to_owned(),
+            other => panic!("unsupported trap fixture return type {other}"),
+        })
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [] => "[]".to_owned(),
+        [value] => value.clone(),
+        _ => format!("[{}]", values.join(", ")),
+    }
+}
+
+enum FixtureCommand {
+    Run(RunCommand),
+    Trap(Invocation),
+}
+
+enum Execution {
+    Returned(Vec<DataValue>),
+    Trapped(String),
+    Failed(String),
+}
+
+fn interpret(functions: &[Function], entry_name: &str, args: &[DataValue]) -> Execution {
+    let mut function_store = FunctionStore::default();
+    for function in functions {
+        function_store.add(function.name.to_string(), function);
+    }
+    let state = InterpreterState::default().with_function_store(function_store);
     let mut interpreter = Interpreter::new(state).with_fuel(Some(100_000));
-    match interpreter.call_by_name("test", args) {
-        Ok(ControlFlow::Return(values)) => values.into_vec(),
-        Ok(ControlFlow::Trap(trap)) => panic!(
-            "{} case {} trapped in CLIF: {trap}",
-            path.display(),
-            case + 1
-        ),
-        Ok(other) => panic!(
-            "{} case {} ended unexpectedly: {other:?}",
-            path.display(),
-            case + 1
-        ),
-        Err(error) => panic!(
-            "{} case {} failed in CLIF interpreter: {error}",
-            path.display(),
-            case + 1
-        ),
+    match interpreter.call_by_name(entry_name, args) {
+        Ok(ControlFlow::Return(values)) => Execution::Returned(values.into_vec()),
+        Ok(ControlFlow::Trap(trap)) => Execution::Trapped(format!("CLIF trapped: {trap}")),
+        Ok(other) => Execution::Failed(format!("CLIF ended unexpectedly: {other:?}")),
+        Err(error) => Execution::Failed(format!("CLIF interpreter failed: {error:?}")),
     }
 }
 
@@ -116,7 +194,7 @@ fn execute_wasm(
     args: &[DataValue],
     path: &Path,
     case: usize,
-) -> Vec<DataValue> {
+) -> Execution {
     let mut store = Store::new(engine, ());
     let instance = Instance::new(&mut store, module, &[]).unwrap_or_else(|e| {
         panic!(
@@ -135,10 +213,11 @@ fn execute_wasm(
         .iter()
         .flat_map(|ret| wasm_result_types(ret.value_type))
         .collect::<Vec<_>>();
-    func.call(&mut store, &wasm_args, &mut results)
-        .unwrap_or_else(|e| panic!("{} case {} trapped in wasm: {e}", path.display(), case + 1));
+    if let Err(error) = func.call(&mut store, &wasm_args, &mut results) {
+        return Execution::Trapped(format!("wasm trapped: {error}"));
+    }
     let mut index = 0;
-    function
+    let values = function
         .signature
         .returns
         .iter()
@@ -147,7 +226,48 @@ fn execute_wasm(
             index += count;
             value
         })
-        .collect()
+        .collect::<Vec<_>>();
+    Execution::Returned(values)
+}
+
+fn returned(execution: Execution, engine: &str, path: &Path, case: usize) -> Vec<DataValue> {
+    match execution {
+        Execution::Returned(values) => values,
+        Execution::Trapped(error) | Execution::Failed(error) => {
+            panic!("{} case {}: {engine}: {error}", path.display(), case + 1)
+        }
+    }
+}
+
+fn assert_trapped(reference: Execution, actual: Execution, path: &Path, case: usize) {
+    match (reference, actual) {
+        (Execution::Trapped(_), Execution::Trapped(_)) => {}
+        (Execution::Returned(reference), Execution::Returned(actual)) => panic!(
+            "{} case {}: expected both engines to trap, both returned; CLIF={reference:?}, wasm={actual:?}",
+            path.display(),
+            case + 1
+        ),
+        (Execution::Trapped(error), Execution::Returned(actual)) => panic!(
+            "{} case {}: expected wasm to trap like the CLIF interpreter ({error}), but returned {actual:?}",
+            path.display(),
+            case + 1
+        ),
+        (Execution::Returned(reference), Execution::Trapped(error)) => panic!(
+            "{} case {}: expected the CLIF interpreter to trap like wasm ({error}), but returned {reference:?}",
+            path.display(),
+            case + 1
+        ),
+        (Execution::Failed(error), _) => panic!(
+            "{} case {}: CLIF interpreter failed instead of trapping: {error}",
+            path.display(),
+            case + 1
+        ),
+        (_, Execution::Failed(error)) => panic!(
+            "{} case {}: wasm execution failed instead of trapping: {error}",
+            path.display(),
+            case + 1
+        ),
+    }
 }
 
 fn to_wasm_args(value: &DataValue) -> Vec<Val> {

@@ -414,8 +414,20 @@ pub fn translate_module_with_layout_options(
         }
     }
 
+    let testcase_callees = funcs
+        .iter()
+        .enumerate()
+        .flat_map(|(ordinal, nf)| {
+            let callee = (ordinal as u32, wfuncs[ordinal]);
+            [
+                (nf.name.to_owned(), callee),
+                (nf.func.name.to_string(), callee),
+            ]
+        })
+        .collect::<HashMap<_, _>>();
     let mctx = ModCtx {
         callees: &wfuncs,
+        testcase_callees: &testcase_callees,
         mem0,
         shared_memory,
         stack_limit: Some(if layout.is_some() {

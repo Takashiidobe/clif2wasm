@@ -1,0 +1,11 @@
+; run: %loads() == -128
+function %loads() -> i32 {
+    ss0 = explicit_slot 4
+
+block0:
+    v0 = stack_addr.i32 ss0
+    v1 = iconst.i32 128
+    store.i32 v1, v0
+    v2 = sload8.i32 v0
+    return v2
+}

@@ -1,0 +1,5 @@
+; trap: %fail()
+function %fail() -> i32 {
+block0:
+    trap user1
+}

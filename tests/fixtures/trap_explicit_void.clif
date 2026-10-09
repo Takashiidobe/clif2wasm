@@ -1,0 +1,5 @@
+; trap: %fail()
+function %fail() {
+block0:
+    trap user1
+}

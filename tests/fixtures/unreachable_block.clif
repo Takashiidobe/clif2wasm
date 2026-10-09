@@ -1,0 +1,9 @@
+; run: %return() == 7
+function %return() -> i32 {
+block0:
+    v0 = iconst.i32 7
+    return v0
+block1:
+    v1 = iconst.i32 99
+    return v1
+}

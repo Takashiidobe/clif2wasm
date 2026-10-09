@@ -34,6 +34,7 @@ pub struct ModCtx<'a> {
     /// waffle Func index for each input function, by ordinal (call resolution).
     pub tail_calls: Option<&'a HashMap<(bool, u32), waffle::Func>>,
     pub callees: &'a [waffle::Func],
+    pub testcase_callees: &'a HashMap<String, (u32, waffle::Func)>,
     /// The module's single linear memory.
     pub mem0: waffle::Memory,
     pub shared_memory: bool,
@@ -498,6 +499,13 @@ pub fn translate_function(
                         .with_context(|| format!("lowering `{}`", clif.dfg.display_inst(inst)))?;
                 }
             }
+        }
+    }
+
+    for block in clif.layout.blocks() {
+        let wb = bmap[&block];
+        if matches!(&body.blocks[wb].terminator, Terminator::None) {
+            body.set_terminator(wb, Terminator::Unreachable);
         }
     }
 

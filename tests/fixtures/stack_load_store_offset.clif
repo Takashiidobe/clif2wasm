@@ -1,0 +1,11 @@
+; run: %memory() == 305419896
+function %memory() -> i32 {
+    ss0 = explicit_slot 8
+
+block0:
+    v0 = stack_addr.i32 ss0
+    v1 = iconst.i32 305419896
+    store.i32 v1, v0+4
+    v2 = load.i32 v0+4
+    return v2
+}

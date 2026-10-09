@@ -1,0 +1,8 @@
+; entry: %main
+; error: unresolved fixture function reference
+function %main() -> i32 {
+    fn0 = %missing() -> i32
+block0:
+    v0 = call fn0()
+    return v0
+}

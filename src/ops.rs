@@ -845,9 +845,10 @@ pub fn lower_inst(
             func_ref,
         } => {
             let result = dfg.first_result(inst);
+            let result_ty = dfg.value_type(result);
             ensure!(
-                dfg.value_type(result) == types::I32,
-                "func_addr result must be i32 (a table index on wasm32)"
+                matches!(result_ty, types::I32 | types::I64),
+                "func_addr result must be i32 or i64, got {result_ty}"
             );
             let (ordinal, _) = resolve_callee(cx, func_ref)?;
             let ordinal =
@@ -858,22 +859,38 @@ pub fn lower_inst(
                     .funcs
                     .get(&ordinal)
                     .with_context(|| format!("no marker for func_addr of ordinal {ordinal}"))?;
-                let wv = body.add_op(
+                let marker = body.add_op(
                     wb,
                     Operator::GlobalGet { global_index: *g },
                     &[],
                     &[Type::I32],
                 );
+                let wv = if result_ty == types::I64 {
+                    body.add_op(wb, Operator::I64ExtendI32U, &[marker], &[Type::I64])
+                } else {
+                    marker
+                };
                 cx.bind1(result, wv);
                 return Ok(());
             }
             // Table slot 0 is null; function k lives at k+1.
-            let wv = body.add_op(
-                wb,
-                Operator::I32Const { value: ordinal + 1 },
-                &[],
-                &[Type::I32],
-            );
+            let wv = match result_ty {
+                types::I32 => body.add_op(
+                    wb,
+                    Operator::I32Const { value: ordinal + 1 },
+                    &[],
+                    &[Type::I32],
+                ),
+                types::I64 => body.add_op(
+                    wb,
+                    Operator::I64Const {
+                        value: (ordinal + 1) as u64,
+                    },
+                    &[],
+                    &[Type::I64],
+                ),
+                _ => unreachable!(),
+            };
             cx.bind1(result, wv);
         }
 
@@ -903,16 +920,20 @@ pub fn lower_inst(
             let all = args.as_slice(&dfg.value_lists);
             ensure!(!all.is_empty(), "call_indirect with no callee operand");
             let callee_ptr = all[0];
-            ensure!(
-                cx.vty(callee_ptr) == types::I32,
-                "call_indirect callee pointer must be i32 (a table index on wasm32)"
-            );
+            let table_index = match cx.vty(callee_ptr) {
+                types::I32 => cx.one(callee_ptr)?,
+                types::I64 => {
+                    let address = cx.one(callee_ptr)?;
+                    body.add_op(wb, Operator::I32WrapI64, &[address], &[Type::I32])
+                }
+                other => bail!("call_indirect callee pointer must be i32 or i64, got {other}"),
+            };
             let mut wargs = Vec::new();
             for &v in &all[1..] {
                 wargs.extend(cx.expand_use(v)?);
             }
             // wasm call_indirect takes the table index as the LAST operand.
-            wargs.push(cx.one(callee_ptr)?);
+            wargs.push(table_index);
             let sig_index = *cx
                 .sig_map
                 .get(&sig_ref)
@@ -1685,6 +1706,13 @@ fn resolve_callee(cx: &FnCx, func_ref: ir::FuncRef) -> Result<(Option<u32>, waff
     let ext = &cx.clif.dfg.ext_funcs[func_ref];
     let name_ref = match ext.name {
         ir::ExternalName::User(r) => r,
+        ir::ExternalName::TestCase(ref name) => {
+            let (ordinal, callee) =
+                cx.m.testcase_callees
+                    .get(&name.to_string())
+                    .with_context(|| format!("unresolved fixture function reference `{name}`"))?;
+            return Ok((Some(*ordinal), *callee));
+        }
         ir::ExternalName::LibCall(lc) => {
             let object_mode = cx.m.object_markers.is_some();
             let kind = match lc {

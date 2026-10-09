@@ -470,8 +470,10 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     // ---- 2. translate bodies ----
     let empty_addrs: Vec<u32> = Vec::new();
     let empty_by_name: HashMap<String, u32> = HashMap::new();
+    let empty_callees: HashMap<String, (u32, waffle::Func)> = HashMap::new();
     let mctx = ModCtx {
         callees: &wfuncs,
+        testcase_callees: &empty_callees,
         mem0,
         shared_memory: false,
         stack_limit: None,
