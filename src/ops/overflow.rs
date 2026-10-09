@@ -180,8 +180,7 @@ fn overflow_parts(
     body: &mut FunctionBody,
     wb: waffle::Block,
     ty: ir::Type,
-    kind: Kind,
-    signed: bool,
+    (kind, signed): (Kind, bool),
     operands: (ir::Value, ir::Value),
     carry: Option<ir::Value>,
 ) -> Result<(waffle::Value, waffle::Value)> {
@@ -246,7 +245,7 @@ pub(super) fn lower_scalar_overflow(
     let results = dfg.inst_results(inst).to_vec();
     let ty = dfg.value_type(results[0]);
     let (kind, signed) = classify(opcode);
-    let (value, flag) = overflow_parts(cx, body, wb, ty, kind, signed, operands, carry)?;
+    let (value, flag) = overflow_parts(cx, body, wb, ty, (kind, signed), operands, carry)?;
     cx.bind1(results[0], value);
     cx.bind1(results[1], flag);
     Ok(())
@@ -273,8 +272,15 @@ pub(crate) fn lower_add_trap_value(
         cx.bind2(result, sum.0, sum.1);
         return Ok(flag);
     }
-    let (value, flag) =
-        overflow_parts(cx, body, wb, ty, Kind::Add, false, (args[0], args[1]), None)?;
+    let (value, flag) = overflow_parts(
+        cx,
+        body,
+        wb,
+        ty,
+        (Kind::Add, false),
+        (args[0], args[1]),
+        None,
+    )?;
     cx.bind1(result, value);
     Ok(flag)
 }
