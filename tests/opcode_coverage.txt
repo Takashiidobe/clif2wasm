@@ -10,7 +10,7 @@ bitcast lowered
 bitrev lowered
 bitselect lowered
 blendv lowered
-bmask unsupported aaw.17
+bmask lowered
 bnot lowered
 bor lowered
 br_table lowered
@@ -20,7 +20,7 @@ bxor lowered
 call lowered
 call_indirect lowered
 ceil lowered
-cls unsupported aaw.17
+cls lowered
 clz lowered
 ctz lowered
 debugtrap erased no-op; no debugger observes it (docs/machine-state.md)

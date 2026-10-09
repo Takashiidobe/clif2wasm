@@ -595,6 +595,126 @@ pub(super) fn lower_unary(
             }
             cx.bind1(result, wv);
         }
+        Opcode::Cls => {
+            let result = dfg.first_result(inst);
+            let rty = dfg.value_type(result);
+            ensure!(
+                matches!(
+                    rty,
+                    types::I8 | types::I16 | types::I32 | types::I64 | types::I128
+                ),
+                "cls on {rty} is unsupported"
+            );
+            if rty == types::I128 {
+                let (lo, hi) = cx.pair(arg)?;
+                let c63 = body.add_op(wb, Operator::I64Const { value: 63 }, &[], &[Type::I64]);
+                let sign = body.add_op(wb, Operator::I64ShrS, &[hi, c63], &[Type::I64]);
+                let thi = body.add_op(wb, Operator::I64Xor, &[hi, sign], &[Type::I64]);
+                let tlo = body.add_op(wb, Operator::I64Xor, &[lo, sign], &[Type::I64]);
+                let p = body.add_op(wb, Operator::I64Clz, &[thi], &[Type::I64]);
+                let s = body.add_op(wb, Operator::I64Clz, &[tlo], &[Type::I64]);
+                let c64 = body.add_op(wb, Operator::I64Const { value: 64 }, &[], &[Type::I64]);
+                let s64 = body.add_op(wb, Operator::I64Add, &[s, c64], &[Type::I64]);
+                let z = body.add_op(wb, Operator::I64Eqz, &[thi], &[Type::I32]);
+                let clz = body.add_op(wb, Operator::Select, &[s64, p, z], &[Type::I64]);
+                let one = body.add_op(wb, Operator::I64Const { value: 1 }, &[], &[Type::I64]);
+                let r = body.add_op(wb, Operator::I64Sub, &[clz, one], &[Type::I64]);
+                let zero = body.add_op(wb, Operator::I64Const { value: 0 }, &[], &[Type::I64]);
+                cx.bind2(result, r, zero);
+                return Ok(());
+            }
+            let wty = map_type(rty)?;
+            let mut v = cx.one(arg)?;
+            let narrow = matches!(rty, types::I8 | types::I16);
+            if narrow {
+                v = sign_extend_narrow(body, wb, v, rty);
+            }
+            let (shr, xor, clz, const_op, one_op, sub) = if wty == Type::I64 {
+                (
+                    Operator::I64ShrS,
+                    Operator::I64Xor,
+                    Operator::I64Clz,
+                    Operator::I64Const { value: 63 },
+                    Operator::I64Const { value: 1 },
+                    Operator::I64Sub,
+                )
+            } else {
+                (
+                    Operator::I32ShrS,
+                    Operator::I32Xor,
+                    Operator::I32Clz,
+                    Operator::I32Const { value: 31 },
+                    Operator::I32Const { value: 1 },
+                    Operator::I32Sub,
+                )
+            };
+            let top = body.add_op(wb, const_op, &[], &[wty]);
+            let sign = body.add_op(wb, shr, &[v, top], &[wty]);
+            let t = body.add_op(wb, xor, &[v, sign], &[wty]);
+            let count = body.add_op(wb, clz, &[t], &[wty]);
+            let one = body.add_op(wb, one_op, &[], &[wty]);
+            let mut wv = body.add_op(wb, sub, &[count, one], &[wty]);
+            if narrow {
+                let pad = if rty == types::I8 { 24 } else { 16 };
+                let pad = body.add_op(wb, Operator::I32Const { value: pad }, &[], &[Type::I32]);
+                wv = body.add_op(wb, Operator::I32Sub, &[wv, pad], &[Type::I32]);
+            }
+            cx.bind1(result, wv);
+        }
+        Opcode::Bmask => {
+            let result = dfg.first_result(inst);
+            let rty = dfg.value_type(result);
+            ensure!(
+                !src_ty.is_vector() && !rty.is_vector(),
+                "bmask on vectors ({src_ty} -> {rty}) is unsupported"
+            );
+            ensure!(
+                matches!(
+                    src_ty,
+                    types::I8 | types::I16 | types::I32 | types::I64 | types::I128
+                ),
+                "bmask source type {src_ty} is unsupported"
+            );
+            ensure!(
+                matches!(
+                    rty,
+                    types::I8 | types::I16 | types::I32 | types::I64 | types::I128
+                ),
+                "bmask result type {rty} is unsupported"
+            );
+            let is_zero = match src_ty {
+                types::I128 => {
+                    let (lo, hi) = cx.pair(arg)?;
+                    let or = body.add_op(wb, Operator::I64Or, &[lo, hi], &[Type::I64]);
+                    body.add_op(wb, Operator::I64Eqz, &[or], &[Type::I32])
+                }
+                types::I64 => {
+                    let v = cx.one(arg)?;
+                    body.add_op(wb, Operator::I64Eqz, &[v], &[Type::I32])
+                }
+                _ => {
+                    let v = cx.one(arg)?;
+                    body.add_op(wb, Operator::I32Eqz, &[v], &[Type::I32])
+                }
+            };
+            let one = body.add_op(wb, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
+            let mask32 = body.add_op(wb, Operator::I32Sub, &[is_zero, one], &[Type::I32]);
+            match rty {
+                types::I64 => {
+                    let m = body.add_op(wb, Operator::I64ExtendI32S, &[mask32], &[Type::I64]);
+                    cx.bind1(result, m);
+                }
+                types::I128 => {
+                    let m = body.add_op(wb, Operator::I64ExtendI32S, &[mask32], &[Type::I64]);
+                    cx.bind2(result, m, m);
+                }
+                types::I8 | types::I16 => {
+                    let m = mask_narrow(body, wb, mask32, rty);
+                    cx.bind1(result, m);
+                }
+                _ => cx.bind1(result, mask32),
+            }
+        }
         // bitrev: classic mask-and-shift bit reversal (no wasm op).
         Opcode::Bitrev => {
             let result = dfg.first_result(inst);

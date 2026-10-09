@@ -1,0 +1,14 @@
+; run: %f(0) == 0
+; run: %f(-1) == -1
+; run: %f(1) == -1
+; run: %f(-2) == -1
+; run: %f(127) == -1
+; run: %f(-128) == -1
+; run: %f(64) == -1
+; run: %f(-65) == -1
+; run: %f(63) == -1
+function %f(i8) -> i8 {
+block0(v0: i8):
+    v1 = bmask.i8 v0
+    return v1
+}
