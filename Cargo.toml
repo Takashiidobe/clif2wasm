@@ -16,7 +16,6 @@ target-lexicon = "0.13"
 waffle = { package = "portal-pc-waffle", version = "0.5.5" }
 wasmparser = "0.261"
 
-wasm-encoder = { version = "0.261", features = ["wasmparser"] }
 thiserror = "2"
 miette = "7"
 

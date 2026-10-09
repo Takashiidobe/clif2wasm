@@ -51,6 +51,13 @@ pub fn lower_inst(
 ) -> Result<()> {
     let dfg = &cx.clif.dfg;
     match dfg.insts[inst] {
+        InstructionData::DynamicStackAddr {
+            opcode: Opcode::DynamicStackAddr,
+            dynamic_stack_slot,
+        } => unsupported!(
+            "dynamic_stack_addr for {dynamic_stack_slot} is unsupported: the wasm runtime has no dynamic stack allocation or lifetime tracking"
+        ),
+
         // --- Constants ---
         InstructionData::UnaryConst {
             opcode: Opcode::Vconst,
@@ -836,6 +843,15 @@ pub fn lower_inst(
                 }
             };
             cx.bind1(dfg.first_result(inst), wv);
+        }
+
+        InstructionData::Ternary { opcode, args }
+            if opcode == Opcode::StackSwitch =>
+        {
+            let _ = args;
+            unsupported!(
+                "stack_switch is unsupported: wasm stack switching requires a stack-context ABI and runtime support, neither of which this module provides"
+            );
         }
 
         InstructionData::Ternary { opcode, args }
@@ -3957,7 +3973,7 @@ fn atomic_mem_arg(cx: &FnCx, ty: types::Type) -> Result<MemoryArg> {
 /// { namespace: 0, index: k }` where `k` is the callee's ordinal in the input slice,
 /// or an `ExternalName::LibCall` routed to a synthesized runtime helper (which has no
 /// ordinal — its address cannot be taken).
-fn resolve_callee(cx: &FnCx, func_ref: ir::FuncRef) -> Result<(Option<u32>, waffle::Func)> {
+pub(crate) fn resolve_callee(cx: &FnCx, func_ref: ir::FuncRef) -> Result<(Option<u32>, waffle::Func)> {
     let ext = &cx.clif.dfg.ext_funcs[func_ref];
     let name_ref = match ext.name {
         ir::ExternalName::User(r) => r,

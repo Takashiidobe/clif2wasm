@@ -483,7 +483,6 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         data_addrs: &empty_addrs,
         data_by_name: &empty_by_name,
         libcalls: &libcall_map,
-        tail_calls: None,
         object_markers: Some(&markers),
     };
     for &k in &defined_fn_ords {

@@ -1,0 +1,31 @@
+; entry: %main
+; fuzz: skip
+; wasm-run: %main(1000000) == 1000000
+function %count(i32, i32) -> i32 tail {
+    ss0 = explicit_slot 16
+    fn0 = %count(i32, i32) -> i32 tail
+block0(v0: i32, v1: i32):
+    v2 = stack_addr.i32 ss0
+    store v0, v2
+    v3 = iconst.i32 0
+    v4 = icmp eq v0, v3
+    brif v4, block1, block2
+
+block1:
+    return v1
+
+block2:
+    v5 = load.i32 v2
+    v6 = iconst.i32 1
+    v7 = isub v5, v6
+    v8 = iadd v1, v6
+    return_call fn0(v7, v8)
+}
+
+function %main(i32) -> i32 {
+    fn0 = %count(i32, i32) -> i32 tail
+block0(v0: i32):
+    v1 = iconst.i32 0
+    v2 = call fn0(v0, v1)
+    return v2
+}

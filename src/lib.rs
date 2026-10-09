@@ -187,4 +187,3 @@ pub fn expand_type(ty: ir::Type) -> ClifResult<Vec<waffle::Type>> {
     }
 }
 
-mod tail;

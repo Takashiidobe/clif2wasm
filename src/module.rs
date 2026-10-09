@@ -272,67 +272,6 @@ pub(crate) fn translate_module_with_layout_options(
         }
     }
 
-    let mut tail_calls = HashMap::new();
-    let mut tail_targets = HashMap::new();
-    for nf in funcs {
-        for inst in nf
-            .func
-            .layout
-            .blocks()
-            .flat_map(|b| nf.func.layout.block_insts(b))
-        {
-            let (key, sigdata, target) = match &nf.func.dfg.insts[inst] {
-                ir::InstructionData::Call {
-                    opcode: ir::Opcode::ReturnCall,
-                    func_ref,
-                    ..
-                } => {
-                    let ext = &nf.func.dfg.ext_funcs[*func_ref];
-                    let ir::ExternalName::User(reference) = ext.name else {
-                        unsupported!("tail libcall unsupported")
-                    };
-                    let ordinal = nf.func.params.user_named_funcs()[reference].index as usize;
-                    let callee = *wfuncs.get(ordinal).context("tail callee out of range")?;
-                    (
-                        (false, ordinal as u32),
-                        signature_data(&nf.func.dfg.signatures[ext.signature])?,
-                        crate::tail::Target::Direct(callee.index() as u32),
-                    )
-                }
-                ir::InstructionData::CallIndirect {
-                    opcode: ir::Opcode::ReturnCallIndirect,
-                    sig_ref,
-                    ..
-                } => {
-                    let data = signature_data(&nf.func.dfg.signatures[*sig_ref])?;
-                    let sig = intern_sig(&mut module, &mut sig_cache, data.clone());
-                    let mut marker_data = data;
-                    let SignatureData::Func { params, .. } = &mut marker_data else {
-                        bail!("tail-call signature is not a function")
-                    };
-                    params.push(Type::I32);
-                    (
-                        (true, sig.index() as u32),
-                        marker_data,
-                        crate::tail::Target::Indirect(sig.index() as u32, table.index() as u32),
-                    )
-                }
-                _ => continue,
-            };
-            if tail_calls.contains_key(&key) {
-                continue;
-            }
-            let sig = intern_sig(&mut module, &mut sig_cache, sigdata);
-            let mut body = FunctionBody::new(&module, sig);
-            body.set_terminator(body.entry, Terminator::Unreachable);
-            let marker = module
-                .funcs
-                .push(FuncDecl::Body(sig, "__tail_marker".into(), body));
-            tail_calls.insert(key, marker);
-            tail_targets.insert(marker.index() as u32, target);
-        }
-    }
-
     let testcase_callees = funcs
         .iter()
         .enumerate()
@@ -360,7 +299,6 @@ pub(crate) fn translate_module_with_layout_options(
         data_by_name: &data_by_name,
         libcalls: &libcalls,
         object_markers: None,
-        tail_calls: Some(&tail_calls),
     };
 
     for (k, nf) in funcs.iter().enumerate() {
@@ -471,10 +409,9 @@ pub(crate) fn translate_module_with_layout_options(
         });
     }
 
-    let bytes = module.to_wasm_bytes().map_err(|error| {
-        crate::error::Error::general(format!("waffle backend compile: {error}"))
-    })?;
-    crate::tail::rewrite(&bytes, tail_targets)
+    module
+        .to_wasm_bytes()
+        .map_err(|error| crate::error::Error::general(format!("waffle backend compile: {error}")))
 }
 
 fn first_line(s: &str) -> &str {

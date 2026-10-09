@@ -1,0 +1,11 @@
+; error-span: dynamic_stack_addr
+; error: dynamic_stack_addr
+function %dynamic() -> i32 {
+    dt0 = i8x16 * gv0
+    gv0 = dyn_scale_target_const.i8x16
+    dss0 = explicit_dynamic_slot dt0
+
+block0:
+    v0 = dynamic_stack_addr.i32 dss0
+    return v0
+}

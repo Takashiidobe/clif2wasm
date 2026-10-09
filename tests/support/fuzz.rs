@@ -17,7 +17,11 @@ fn supported_fixture_programs_match_cranelift_interpreter_for_generated_inputs()
     collect_fixtures(Path::new("tests/fixtures"), &mut paths);
     paths.retain(|path| {
         fs::read_to_string(path)
-            .is_ok_and(|text| !text.lines().any(|line| line.starts_with("; error:")))
+            .is_ok_and(|text| {
+                !text
+                    .lines()
+                    .any(|line| line.starts_with("; error:") || line == "; fuzz: skip")
+            })
     });
     paths.sort();
     assert!(!paths.is_empty(), "no interpreter-backed fixtures found");

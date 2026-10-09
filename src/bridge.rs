@@ -34,7 +34,6 @@ pub enum WVal {
 /// Module-level context every function translation needs.
 pub struct ModCtx<'a> {
     /// waffle Func index for each input function, by ordinal (call resolution).
-    pub tail_calls: Option<&'a HashMap<(bool, u32), waffle::Func>>,
     pub callees: &'a [waffle::Func],
     pub testcase_callees: &'a HashMap<String, (u32, waffle::Func)>,
     /// The module's single linear memory.
@@ -425,17 +424,7 @@ pub fn translate_function(
                     for &v in args.as_slice(&clif.dfg.value_lists) {
                         values.extend(cx.expand_use(v)?);
                     }
-                    // Shadow-stack epilogue: restore the caller's stack pointer.
-                    if let Some(frame) = cx.frame.as_ref() {
-                        body.add_op(
-                            wb,
-                            Operator::GlobalSet {
-                                global_index: m.sp_global,
-                            },
-                            &[frame.sp_old],
-                            &[],
-                        );
-                    }
+                    restore_stack_pointer(&cx, &mut body, wb, m);
                     body.set_terminator(wb, Terminator::Return { values });
                 }
                 InstructionData::Call {
@@ -443,49 +432,19 @@ pub fn translate_function(
                     args,
                     func_ref,
                 } => {
-                    let ext = &clif.dfg.ext_funcs[*func_ref];
-                    let ir::ExternalName::User(reference) = ext.name else {
+                    let (Some(_), func) = ops::resolve_callee(&cx, *func_ref)? else {
                         return Err(crate::error::Error::unsupported("tail libcall unsupported")
                             .at_instruction(
                                 &clif.name.to_string(),
                                 &clif.dfg.display_inst(inst).to_string(),
                             ));
                     };
-                    let ordinal = clif.params.user_named_funcs()[reference].index;
-                    let marker = *m
-                        .tail_calls
-                        .context("tail calls unsupported in object mode")?
-                        .get(&(false, ordinal))
-                        .context("missing tail marker")?;
                     let mut values = Vec::new();
                     for &v in args.as_slice(&clif.dfg.value_lists) {
                         values.extend(cx.expand_use(v)?);
                     }
-                    if let Some(frame) = cx.frame.as_ref() {
-                        body.add_op(
-                            wb,
-                            Operator::GlobalSet {
-                                global_index: m.sp_global,
-                            },
-                            &[frame.sp_old],
-                            &[],
-                        );
-                    }
-                    let result_types = crate::module::signature_parts(
-                        &crate::module::signature_data(&clif.dfg.signatures[ext.signature])?,
-                    )?
-                    .1
-                    .to_vec();
-                    let call = body.add_op(
-                        wb,
-                        Operator::Call {
-                            function_index: marker,
-                        },
-                        &values,
-                        &result_types,
-                    );
-                    let results = tail_results(&mut body, wb, call, &result_types);
-                    body.set_terminator(wb, Terminator::Return { values: results });
+                    restore_stack_pointer(&cx, &mut body, wb, m);
+                    body.set_terminator(wb, Terminator::ReturnCall { func, args: values });
                 }
                 InstructionData::CallIndirect {
                     opcode: ir::Opcode::ReturnCallIndirect,
@@ -493,11 +452,6 @@ pub fn translate_function(
                     sig_ref,
                 } => {
                     let sig = *sig_map.get(sig_ref).context("tail signature missing")?;
-                    let marker = *m
-                        .tail_calls
-                        .context("tail calls unsupported in object mode")?
-                        .get(&(true, sig.index() as u32))
-                        .context("missing indirect tail marker")?;
                     let all = args.as_slice(&clif.dfg.value_lists);
                     let mut values = Vec::new();
                     for &v in &all[1..] {
@@ -514,31 +468,15 @@ pub fn translate_function(
                         }
                     };
                     values.push(table_index);
-                    if let Some(frame) = cx.frame.as_ref() {
-                        body.add_op(
-                            wb,
-                            Operator::GlobalSet {
-                                global_index: m.sp_global,
-                            },
-                            &[frame.sp_old],
-                            &[],
-                        );
-                    }
-                    let result_types = crate::module::signature_parts(
-                        &crate::module::signature_data(&clif.dfg.signatures[*sig_ref])?,
-                    )?
-                    .1
-                    .to_vec();
-                    let call = body.add_op(
+                    restore_stack_pointer(&cx, &mut body, wb, m);
+                    body.set_terminator(
                         wb,
-                        Operator::Call {
-                            function_index: marker,
+                        Terminator::ReturnCallIndirect {
+                            sig,
+                            table: m.table,
+                            args: values,
                         },
-                        &values,
-                        &result_types,
                     );
-                    let results = tail_results(&mut body, wb, call, &result_types);
-                    body.set_terminator(wb, Terminator::Return { values: results });
                 }
                 InstructionData::Trap { .. } => {
                     body.set_terminator(wb, Terminator::Unreachable);
@@ -608,22 +546,15 @@ fn block_target(
     Ok(BlockTarget { block, args })
 }
 
-fn tail_results(
-    body: &mut FunctionBody,
-    block: waffle::Block,
-    call: waffle::Value,
-    types: &[Type],
-) -> Vec<waffle::Value> {
-    if types.len() == 1 {
-        return vec![call];
+fn restore_stack_pointer(cx: &FnCx, body: &mut FunctionBody, wb: waffle::Block, m: &ModCtx) {
+    if let Some(frame) = cx.frame.as_ref() {
+        body.add_op(
+            wb,
+            Operator::GlobalSet {
+                global_index: m.sp_global,
+            },
+            &[frame.sp_old],
+            &[],
+        );
     }
-    types
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| {
-            let value = body.add_value(waffle::ValueDef::PickOutput(call, index as u32, *ty));
-            body.append_to_block(block, value);
-            value
-        })
-        .collect()
 }

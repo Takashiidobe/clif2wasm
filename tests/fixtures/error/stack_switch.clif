@@ -1,0 +1,7 @@
+; error-span: stack_switch
+; error: stack_switch
+function %switch(i32, i32, i32) -> i32 {
+block0(v0: i32, v1: i32, v2: i32):
+    v3 = stack_switch v0, v1, v2
+    return v3
+}

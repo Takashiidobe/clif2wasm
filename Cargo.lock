@@ -70,7 +70,6 @@ dependencies = [
  "portal-pc-waffle",
  "target-lexicon",
  "thiserror",
- "wasm-encoder 0.261.0",
  "wasmi",
  "wasmparser 0.261.0",
 ]
