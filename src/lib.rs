@@ -38,6 +38,7 @@ pub struct DataRelocEntry {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TranslationOptions {
     pub shared_memory_max_pages: Option<usize>,
+    pub lenient: bool,
 }
 
 /// Runtime functions the translator can synthesize directly as wasm bodies (no CLIF

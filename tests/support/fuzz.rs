@@ -810,6 +810,7 @@ fn supported_atomic_opcodes_are_generated_and_wasm_validated() {
             0,
             clif2wasm::TranslationOptions {
                 shared_memory_max_pages: Some(2),
+                ..Default::default()
             },
         )
         .unwrap_or_else(|error| panic!("translating generated `{label}`: {error:#}\n{source}"));

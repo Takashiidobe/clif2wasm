@@ -37,8 +37,7 @@ pub struct WasmModule {
     translation_options: crate::TranslationOptions,
     runtime_overrides: BTreeMap<FuncId, crate::RuntimeFn>,
     /// Undefined symbols allowed to become REAL `env` wasm imports (host-provided at
-    /// instantiation — the playground's print path). From CLIF2WASM_IMPORTS
-    /// (comma-separated) or `allow_import`.
+    /// instantiation — the playground's print path). Set through `allow_import`.
     import_symbols: BTreeMap<String, String>,
 }
 
@@ -100,15 +99,6 @@ impl WasmModule {
             .context("looking up Pulley32 ISA")?
             .finish(flags)
             .context("finishing Pulley32 ISA")?;
-        let import_symbols = std::env::var("CLIF2WASM_IMPORTS")
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .map(|name| (name.clone(), name))
-                    .collect()
-            })
-            .unwrap_or_default();
         Ok(WasmModule {
             isa,
             data_addresses: vec![],
@@ -118,7 +108,7 @@ impl WasmModule {
             data: BTreeMap::new(),
             translation_options: crate::TranslationOptions::default(),
             runtime_overrides: BTreeMap::new(),
-            import_symbols,
+            import_symbols: BTreeMap::new(),
         })
     }
 
@@ -229,7 +219,7 @@ impl WasmModule {
                     // Pointer slots inside the object: resolve each reloc's target to
                     // the module-level ordinal; the translator patches actual values
                     // after layout.
-                    let lenient = std::env::var_os("CLIF2WASM_LENIENT").is_some_and(|v| v == "1");
+                    let lenient = self.translation_options.lenient;
                     let mut relocs = Vec::new();
                     for &(offset, fref) in &d.function_relocs {
                         match reloc_target_ordinal(&d.function_decls[fref], 0) {
@@ -271,7 +261,7 @@ impl WasmModule {
                     }
                     (bytes, relocs)
                 }
-                None if std::env::var_os("CLIF2WASM_LENIENT").is_some_and(|v| v == "1") => {
+                None if self.translation_options.lenient => {
                     // Sysroot tier: cross-crate data import (e.g. core statics seen
                     // from compiler_builtins). Zero placeholder; reads through it are
                     // wrong-but-unreachable rlib-object code, and it's gap-reported.
@@ -316,9 +306,9 @@ impl WasmModule {
         //   2. panic-family symbols -> `unreachable` trap stubs (correct semantics for
         //      -Cpanic=abort without unwinding);
         //   3. anything else -> hard error naming every symbol — unless
-        //      CLIF2WASM_LENIENT=1 (sysroot builds), which stubs them and prints a
+        //      `TranslationOptions::lenient` (sysroot builds), which stubs them and prints a
         //      `clif2wasm-gap:` line per symbol for the gap ratchet.
-        let lenient = std::env::var_os("CLIF2WASM_LENIENT").is_some_and(|v| v == "1");
+        let lenient = self.translation_options.lenient;
         let mut stub_storage: Vec<ir::Function> = Vec::new();
         let mut which: Vec<Option<usize>> = Vec::new(); // index into stub_storage for stubs
         let mut runtime_overrides: std::collections::HashMap<usize, crate::RuntimeFn> =
@@ -358,7 +348,7 @@ impl WasmModule {
         }
         if !missing.is_empty() {
             unsupported!(
-                "undefined non-panic symbols (no linker yet; CLIF2WASM_LENIENT=1 to stub for sysroot builds):\n  {}",
+                "undefined non-panic symbols (no linker yet; set TranslationOptions::lenient to stub for sysroot builds):\n  {}",
                 missing.join("\n  ")
             );
         }

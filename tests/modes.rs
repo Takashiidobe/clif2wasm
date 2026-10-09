@@ -176,6 +176,32 @@ block0:
 }
 
 #[test]
+fn lenient_option_stubs_undefined_symbols() {
+    let mut module = WasmModule::new().unwrap();
+    module.set_translation_options(clif2wasm::TranslationOptions {
+        lenient: true,
+        ..Default::default()
+    });
+    let missing_src = "function %missing() {\nblock0:\n    return\n}";
+    let main_src = "function %main(i32) -> i32 {
+    sig0 = ()
+    fn0 = colocated u0:0 sig0
+block0(v0: i32):
+    brif v0, block1, block2
+block1:
+    call fn0()
+    return v0
+block2:
+    return v0
+}";
+    declare(&mut module, "missing", Linkage::Import, missing_src);
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    define(&mut module, main, main_src);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 0), 0);
+}
+
+#[test]
 fn shadow_stack_overflow_check_traps_before_memory_is_exhausted() {
     let mut module = WasmModule::new().unwrap();
     // the 17th nested 4 KiB frame sits below the stack base but still in bounds, so only the limit check traps
