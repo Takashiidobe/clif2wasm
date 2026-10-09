@@ -6,20 +6,21 @@
 //! stay undefined (function imports from `env`), data lands in named segments placed
 //! by the linker, and a `linking` custom section carries the symbol table.
 //!
-//! Emission strategy: waffle's per-function backend is private, so we build ONE
-//! waffle module whose entity layout equals the object's index space —
-//! memory 0 = imported `__linear_memory`, global 0 = imported `__stack_pointer`,
-//! table 0 = imported `__indirect_function_table`, function imports first — call
-//! `to_wasm_bytes()` once, harvest each function's body bytes out of its code
-//! section with wasmparser (immediates are raw entity indices, so they are already
-//! correct for the object's index space), and hand-assemble the object file around
-//! them. We own every byte, so reloc offsets (B1.b+) fall out of the byte stream.
+//! Emission strategy: we build ONE waffle module whose entity layout equals the
+//! object's index space — memory 0 = imported `__linear_memory`, global 0 = imported
+//! `__stack_pointer`, table 0 = imported `__indirect_function_table`, function
+//! imports first — and compile each body with `WasmFuncBackend::compile`. Immediates
+//! in the result are raw entity indices, so they are already correct for the object's
+//! index space. A splicer then re-emits the reloc-bearing instructions with padded
+//! LEBs (waffle's encoder only writes minimal ones), and we hand-assemble the object
+//! file around the bodies. We own every byte, so reloc offsets fall out of the stream.
 
 use std::collections::HashMap;
 
 use crate::error::{Context, Result};
 use crate::{bail, ensure};
 use cranelift_codegen::ir;
+use waffle::backend::WasmFuncBackend;
 use waffle::{FuncDecl, GlobalData, MemoryData, SignatureData, TableData, Type};
 
 use crate::DataRelocEntry;
@@ -485,6 +486,7 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         libcalls: &libcall_map,
         object_markers: Some(&markers),
     };
+    let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(defined_fn_ords.len());
     for &k in &defined_fn_ords {
         let f = &funcs[k];
         let body = match f.def.as_ref().unwrap() {
@@ -520,16 +522,13 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         body.validate().map_err(|e| {
             crate::error::Error::general(format!("waffle validate() rejected `{}`:\n{e}", f.name))
         })?;
-        module.funcs[wfuncs[k]] = FuncDecl::Body(sigs[k], f.name.to_string(), body);
+        let compiled = WasmFuncBackend::compile(&body).map_err(|e| {
+            crate::error::Error::general(format!("waffle backend compile of `{}`: {e}", f.name))
+        })?;
+        bodies.push(compiled.into_raw_body());
     }
 
-    // ---- 3. compile via waffle, harvest per-function body bytes ----
-    let compiled = module.to_wasm_bytes().map_err(|error| {
-        crate::error::Error::general(format!("waffle backend compile: {error}"))
-    })?;
-    let bodies = harvest_code_bodies(&compiled, defined_fn_ords.len())?;
-
-    // ---- 4. assemble the object ----
+    // ---- 3. assemble the object ----
     let mut w = ObjWriter::new();
 
     // type section: waffle signatures in entity order.
@@ -630,6 +629,7 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     // code section: splice each body (padded reloc-site immediates + per-body
     // relocs), then lay out the section, rebasing reloc offsets onto the payload.
     let mut code_relocs: Vec<Reloc> = Vec::new();
+    let mut uses_tail_call = false;
     let mut p = Vec::new();
     uleb(&mut p, bodies.len() as u64);
     for (i, body) in bodies.iter().enumerate() {
@@ -639,6 +639,7 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
             sp_sym,
             table_sym,
             &marker_relocs,
+            &mut uses_tail_call,
         )
         .with_context(|| format!("splicing function `{}`", funcs[defined_fn_ords[i]].name))?;
         uleb(&mut p, spliced.len() as u64);
@@ -837,10 +838,13 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         );
     }
 
-    // target_features.
+    let mut features = TARGET_FEATURES.to_vec();
+    if uses_tail_call {
+        features.push("tail-call");
+    }
     let mut tf = Vec::new();
-    uleb(&mut tf, TARGET_FEATURES.len() as u64);
-    for f in TARGET_FEATURES {
+    uleb(&mut tf, features.len() as u64);
+    for f in features {
         tf.push(b'+');
         write_name(&mut tf, f);
     }
@@ -849,12 +853,13 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     Ok(w.out)
 }
 
-/// Splice one harvested body: copy bytes verbatim, except at reloc-bearing
+/// Splice one compiled body: copy bytes verbatim, except at reloc-bearing
 /// instructions, which are re-emitted with 5-byte padded LEB immediates and
 /// recorded as relocations (offsets relative to the START OF THIS BODY's bytes).
 ///
-/// Reloc-bearing sites: `call` (FUNCTION_INDEX_LEB via the function's symbol),
-/// `call_indirect` (TYPE_INDEX_LEB on the type + TABLE_NUMBER_LEB on the table),
+/// Reloc-bearing sites: `call`/`return_call` (FUNCTION_INDEX_LEB via the function's
+/// symbol), `call_indirect`/`return_call_indirect` (TYPE_INDEX_LEB on the type +
+/// TABLE_NUMBER_LEB on the table),
 /// `global.get/set` of the stack pointer (GLOBAL_INDEX_LEB). Any other global
 /// index or a `ref.func` is a bug at this stage — B1.c introduces marker globals.
 fn splice_body(
@@ -863,6 +868,7 @@ fn splice_body(
     sp_sym: u32,
     table_sym: u32,
     marker_relocs: &HashMap<u32, (u8, u32, Option<i64>)>,
+    uses_tail_call: &mut bool,
 ) -> Result<(Vec<u8>, Vec<Reloc>)> {
     use wasmparser::Operator as Op;
     let mut out = Vec::with_capacity(body.len() + 32);
@@ -879,9 +885,11 @@ fn splice_body(
         let op_end = usize::try_from(reader.original_position())
             .context("instruction end exceeds address space")?;
         match op {
-            Op::Call { function_index } => {
+            Op::Call { function_index } | Op::ReturnCall { function_index } => {
+                let tail = matches!(op, Op::ReturnCall { .. });
+                *uses_tail_call |= tail;
                 out.extend_from_slice(&body[copied_to..op_start]);
-                out.push(0x10);
+                out.push(if tail { 0x12 } else { 0x10 });
                 let sym = *fn_sym_of_wasm_index
                     .get(function_index as usize)
                     .ok_or_else(|| {
@@ -901,9 +909,15 @@ fn splice_body(
             Op::CallIndirect {
                 type_index,
                 table_index,
+            }
+            | Op::ReturnCallIndirect {
+                type_index,
+                table_index,
             } => {
+                let tail = matches!(op, Op::ReturnCallIndirect { .. });
+                *uses_tail_call |= tail;
                 out.extend_from_slice(&body[copied_to..op_start]);
-                out.push(0x11);
+                out.push(if tail { 0x13 } else { 0x11 });
                 relocs.push(Reloc {
                     ty: R_WASM_TYPE_INDEX_LEB,
                     offset: out.len() as u32,
@@ -975,26 +989,4 @@ fn splice_body(
     }
     out.extend_from_slice(&body[copied_to..]);
     Ok((out, relocs))
-}
-
-/// Pull each function's body bytes (locals + instructions, no size prefix) out of a
-/// complete wasm module's code section.
-fn harvest_code_bodies(wasm: &[u8], expect: usize) -> Result<Vec<Vec<u8>>> {
-    use wasmparser::{Parser, Payload};
-    let mut bodies = Vec::with_capacity(expect);
-    for payload in Parser::new(0).parse_all(wasm) {
-        if let Payload::CodeSectionEntry(body) = payload.context("parsing waffle output")? {
-            let range = body.range();
-            let start =
-                usize::try_from(range.start).context("function start exceeds address space")?;
-            let end = usize::try_from(range.end).context("function end exceeds address space")?;
-            bodies.push(wasm[start..end].to_vec());
-        }
-    }
-    ensure!(
-        bodies.len() == expect,
-        "harvested {} bodies from waffle output, expected {expect}",
-        bodies.len()
-    );
-    Ok(bodies)
 }
