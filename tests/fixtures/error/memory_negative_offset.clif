@@ -1,0 +1,6 @@
+; error: negative load/store offset -1 is unsupported
+function %load(i32) -> i32 {
+block0(v0: i32):
+    v1 = load.i32 v0-1
+    return v1
+}

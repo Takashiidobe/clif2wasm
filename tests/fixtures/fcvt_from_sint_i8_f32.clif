@@ -1,0 +1,9 @@
+; run: %convert(-128) == -0x1.0p7
+; run: %convert(-1) == -0x1.0p0
+; run: %convert(0) == 0x0.0p0
+; run: %convert(127) == 0x1.fcp6
+function %convert(i8) -> f32 {
+block0(v0: i8):
+    v1 = fcvt_from_sint.f32 v0
+    return v1
+}

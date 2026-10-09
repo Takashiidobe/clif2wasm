@@ -1,0 +1,10 @@
+; run: %store() == -129
+function %store() -> i32 {
+    ss0 = explicit_slot 4
+block0:
+    v0 = stack_addr.i32 ss0
+    v1 = iconst.i64 -129
+    istore16 v1, v0
+    v2 = sload16.i32 v0
+    return v2
+}

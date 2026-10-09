@@ -1,0 +1,12 @@
+; run: %convert(-0x1.0p0) == 0
+; run: %convert(-0x1.ccccccccccccdp-1) == 0
+; run: %convert(0x1.ccccccccccccdp-1) == 0
+; run: %convert(0x1.fffcp15) == -2
+; run: %convert(0x1.fffcp15) == -2
+; run: %convert(0x1.0p16) == -1
+; run: %convert(NaN) == 0
+function %convert(f64) -> i16 {
+block0(v0: f64):
+    v1 = fcvt_to_uint_sat.i16 v0
+    return v1
+}

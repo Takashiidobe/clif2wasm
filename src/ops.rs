@@ -957,9 +957,10 @@ pub fn lower_inst(
         InstructionData::Load {
             opcode,
             arg,
-            flags: _,
+            flags,
             offset,
         } => {
+            validate_memory_flags(cx, flags, "load")?;
             let addr = lower_addr(cx, arg)?;
             let result = dfg.first_result(inst);
             let rty = dfg.value_type(result);
@@ -998,7 +999,14 @@ pub fn lower_inst(
                     let base_offset: i32 = offset.into();
                     let mut values = Vec::with_capacity(chunks);
                     for i in 0..chunks {
-                        let memory = mem_arg_at(cx, base_offset + i as i32 * 16)?;
+                        let lane_offset = base_offset
+                            .checked_add(
+                                (i as i32)
+                                    .checked_mul(16)
+                                    .context("vector load offset overflow")?,
+                            )
+                            .context("vector load offset overflow")?;
+                        let memory = mem_arg_at(cx, lane_offset)?;
                         values.push(body.add_op(
                             wb,
                             Operator::V128Load { memory },
@@ -1015,7 +1023,7 @@ pub fn lower_inst(
                 let off: i32 = offset.into();
                 ensure!(off >= 0, "negative i128 load offset");
                 let m0 = mem_arg(cx, offset)?;
-                let m8 = mem_arg(cx, (off + 8).into())?;
+                let m8 = mem_arg_at(cx, off.checked_add(8).context("i128 load offset overflow")?)?;
                 let lo = body.add_op(wb, Operator::I64Load { memory: m0 }, &[addr], &[Type::I64]);
                 let hi = body.add_op(wb, Operator::I64Load { memory: m8 }, &[addr], &[Type::I64]);
                 cx.bind2(result, lo, hi);
@@ -1064,9 +1072,10 @@ pub fn lower_inst(
         InstructionData::Store {
             opcode,
             args,
-            flags: _,
+            flags,
             offset,
         } => {
+            validate_memory_flags(cx, flags, "store")?;
             if cx.vty(args[0]).is_vector() && opcode == Opcode::Store {
                 let ty = cx.vty(args[0]);
                 let addr = lower_addr(cx, args[1])?;
@@ -1096,7 +1105,14 @@ pub fn lower_inst(
                 } else {
                     let base_offset: i32 = offset.into();
                     for (i, &value) in vector.iter().enumerate() {
-                        let memory = mem_arg_at(cx, base_offset + i as i32 * 16)?;
+                        let lane_offset = base_offset
+                            .checked_add(
+                                (i as i32)
+                                    .checked_mul(16)
+                                    .context("vector store offset overflow")?,
+                            )
+                            .context("vector store offset overflow")?;
+                        let memory = mem_arg_at(cx, lane_offset)?;
                         body.add_op(wb, Operator::V128Store { memory }, &[addr, value], &[]);
                     }
                 }
@@ -1109,7 +1125,10 @@ pub fn lower_inst(
                 let off: i32 = offset.into();
                 ensure!(off >= 0, "negative i128 store offset");
                 let m0 = mem_arg(cx, offset)?;
-                let m8 = mem_arg(cx, (off + 8).into())?;
+                let m8 = mem_arg_at(
+                    cx,
+                    off.checked_add(8).context("i128 store offset overflow")?,
+                )?;
                 body.add_op(wb, Operator::I64Store { memory: m0 }, &[addr, lo], &[]);
                 body.add_op(wb, Operator::I64Store { memory: m8 }, &[addr, hi], &[]);
                 return Ok(());
@@ -3882,6 +3901,15 @@ fn lower_addr(cx: &FnCx, addr: ir::Value) -> Result<waffle::Value> {
         "address has CLIF type {ty}, expected i32 — was this CLIF built for a 64-bit pointer target?"
     );
     Ok(cx.one(addr)?)
+}
+
+fn validate_memory_flags(cx: &FnCx, flags: ir::MemFlags, operation: &str) -> Result<()> {
+    let data = cx.clif.dfg.mem_flags[flags];
+    ensure!(
+        data.explicit_endianness() != Some(ir::Endianness::Big),
+        "big-endian {operation} is unsupported; WebAssembly memory is little-endian"
+    );
+    Ok(())
 }
 
 fn mem_arg(cx: &FnCx, offset: ir::immediates::Offset32) -> Result<MemoryArg> {

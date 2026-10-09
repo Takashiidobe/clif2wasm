@@ -1,0 +1,11 @@
+; run: %convert(-0x1.02p7) == -128
+; run: %convert(-0x1.ff33333333333p6) == -127
+; run: %convert(0x1.fba6666666666p6) == 126
+; run: %convert(0x1.ffccccccccccdp6) == 127
+; run: %convert(0x1.0p7) == 127
+; run: %convert(NaN) == 0
+function %convert(f64) -> i8 {
+block0(v0: f64):
+    v1 = fcvt_to_sint_sat.i8 v0
+    return v1
+}
