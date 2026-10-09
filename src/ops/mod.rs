@@ -159,6 +159,12 @@ pub fn lower_inst(
         }
 
         // --- Unary int conversions (and isplit) ---
+        InstructionData::Unary {
+            opcode: Opcode::SetPinnedReg,
+            ..
+        } => unsupported!(
+            "pinned registers are unsupported: wasm has no reserved register and the relocatable form has no slot for a pinned-register global"
+        ),
         InstructionData::Unary { opcode, arg } => {
             lower_unary(cx, body, wb, inst, opcode, arg)?;
         }
@@ -395,6 +401,47 @@ pub fn lower_inst(
 
         // --- Indirect calls ---
         InstructionData::CallIndirect { .. } => lower_call_indirect(cx, body, wb, inst)?,
+
+        InstructionData::NullAry {
+            opcode: Opcode::Debugtrap,
+        } => {}
+        InstructionData::NullAry {
+            opcode: Opcode::GetStackPointer,
+        } => {
+            let result = cx.clif.dfg.first_result(inst);
+            ensure!(
+                cx.vty(result) == types::I32,
+                "get_stack_pointer must produce a 32-bit pointer, got {}",
+                cx.vty(result)
+            );
+            let sp = body.add_op(
+                wb,
+                Operator::GlobalGet {
+                    global_index: cx.m.sp_global,
+                },
+                &[],
+                &[Type::I32],
+            );
+            cx.bind1(result, sp);
+        }
+        InstructionData::NullAry {
+            opcode: Opcode::GetPinnedReg,
+        } => unsupported!(
+            "pinned registers are unsupported: wasm has no reserved register and the relocatable form has no slot for a pinned-register global"
+        ),
+        InstructionData::NullAry {
+            opcode: Opcode::GetFramePointer,
+        } => unsupported!(
+            "get_frame_pointer is unsupported: the shadow-stack frame has no frame-pointer chain"
+        ),
+        InstructionData::NullAry {
+            opcode: Opcode::GetReturnAddress,
+        } => unsupported!(
+            "get_return_address is unsupported: wasm return addresses are not observable"
+        ),
+        InstructionData::ExceptionHandlerAddress { .. } => unsupported!(
+            "get_exception_handler_address is unsupported: handler addresses are not observable in wasm"
+        ),
 
         ref other => unsupported!("unimplemented opcode {}", other.opcode()),
     }

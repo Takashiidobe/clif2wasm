@@ -348,9 +348,34 @@ pub fn translate_function(
     let cfg = ControlFlowGraph::with_function(clif);
     let domtree = DominatorTree::with_function(clif, &cfg);
     for &block in domtree.cfg_rpo() {
-        let wb = bmap[&block];
+        let mut wb = bmap[&block];
         for inst in clif.layout.block_insts(block) {
             match &clif.dfg.insts[inst] {
+                InstructionData::CondTrap { opcode, arg, .. } => {
+                    let cond = ops::coerce_cond(&cx, &mut body, wb, *arg)?;
+                    let trap = body.add_block();
+                    let resume = body.add_block();
+                    body.set_terminator(trap, Terminator::Unreachable);
+                    let (on_true, on_false) = match opcode {
+                        ir::Opcode::Trapnz => (trap, resume),
+                        _ => (resume, trap),
+                    };
+                    body.set_terminator(
+                        wb,
+                        Terminator::CondBr {
+                            cond,
+                            if_true: BlockTarget {
+                                block: on_true,
+                                args: vec![],
+                            },
+                            if_false: BlockTarget {
+                                block: on_false,
+                                args: vec![],
+                            },
+                        },
+                    );
+                    wb = resume;
+                }
                 InstructionData::Jump { destination, .. } => {
                     let target = block_target(&cx, &bmap, destination, &[])?;
                     body.set_terminator(wb, Terminator::Br { target });

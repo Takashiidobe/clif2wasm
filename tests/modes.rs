@@ -601,3 +601,109 @@ block0(v0: i32, v1: i32, v2: i32):
     );
     assert!(message.contains("tail libcall unsupported"), "{message}");
 }
+
+fn run_i32_result(bytes: &[u8], export: &str, arg: i32) -> Result<i32, wasmi::Error> {
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).unwrap();
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let func = instance.get_func(&store, export).unwrap();
+    let mut results = [wasmi::Val::I32(0)];
+    func.call(&mut store, &[wasmi::Val::I32(arg)], &mut results)?;
+    let wasmi::Val::I32(value) = results[0] else {
+        panic!("non-i32 result")
+    };
+    Ok(value)
+}
+
+fn conditional_trap_module(opcode: &str) -> Vec<u8> {
+    let mut module = WasmModule::new().unwrap();
+    let source = format!(
+        "function %main(i32) -> i32 {{
+block0(v0: i32):
+    {opcode} v0, user1
+    v1 = iconst.i32 42
+    return v1
+}}"
+    );
+    let main = declare(&mut module, "main", Linkage::Export, &source);
+    define(&mut module, main, &source);
+    module.finish().unwrap()
+}
+
+#[test]
+fn trapz_traps_only_on_zero() {
+    let bytes = conditional_trap_module("trapz");
+    assert!(run_i32_result(&bytes, "main", 0).is_err());
+    assert_eq!(run_i32_result(&bytes, "main", 5).unwrap(), 42);
+}
+
+#[test]
+fn trapnz_traps_only_on_nonzero() {
+    let bytes = conditional_trap_module("trapnz");
+    assert!(run_i32_result(&bytes, "main", 5).is_err());
+    assert_eq!(run_i32_result(&bytes, "main", 0).unwrap(), 42);
+}
+
+#[test]
+fn debugtrap_is_a_no_op() {
+    let mut module = WasmModule::new().unwrap();
+    let source = "function %main(i32) -> i32 {
+block0(v0: i32):
+    debugtrap
+    return v0
+}";
+    let main = declare(&mut module, "main", Linkage::Export, source);
+    define(&mut module, main, source);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 9), 9);
+}
+
+#[test]
+fn get_stack_pointer_tracks_the_shadow_stack() {
+    let mut module = WasmModule::new().unwrap();
+    let source = "function %main(i32) -> i32 {
+    ss0 = explicit_slot 32
+block0(v0: i32):
+    v1 = get_stack_pointer.i32
+    v2 = stack_addr.i32 ss0
+    v3 = icmp eq v1, v2
+    v4 = uextend.i32 v3
+    return v4
+}";
+    let main = declare(&mut module, "main", Linkage::Export, source);
+    define(&mut module, main, source);
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 0), 1);
+}
+
+#[test]
+fn machine_state_intrinsics_without_a_wasm_equivalent_are_rejected() {
+    for (body, expected) in [
+        (
+            "v1 = get_pinned_reg.i32",
+            "pinned registers are unsupported",
+        ),
+        ("set_pinned_reg v0", "pinned registers are unsupported"),
+        (
+            "v1 = get_frame_pointer.i32",
+            "get_frame_pointer is unsupported",
+        ),
+        (
+            "v1 = get_return_address.i32",
+            "get_return_address is unsupported",
+        ),
+    ] {
+        let source = format!(
+            "function %main(i32) {{
+block0(v0: i32):
+    {body}
+    return
+}}"
+        );
+        let message = translate_error(&source);
+        assert!(message.contains(expected), "{body}: {message}");
+    }
+}
