@@ -27,24 +27,21 @@
 //! particular, we use this for GVN, where if a key already exists, we
 //! use it rather than setting it again in a more nested scope.
 
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::fmt::Debug;
-use core::hash::Hash;
-use hashbrown::HashMap;
+use fxhash::FxHashMap;
+use std::fmt::Debug;
+use std::hash::Hash;
 
 /// A scoped hashmap: a key-value map with "push" and "pop" operations
 /// and the ability to quickly remove mappings created at a given
 /// level when popping.
 #[derive(Clone, Debug)]
 pub struct ScopedMap<K: Hash + Eq + Clone + Debug, V: Clone + Debug> {
-    map: HashMap<K, ScopedMapEntry<V>>,
+    map: FxHashMap<K, ScopedMapEntry<V>>,
     gen: u32,
     gen_by_level: Vec<u32>,
 }
 
-impl<K: Hash + Eq + Clone + Debug, V: Clone + Debug> core::default::Default for ScopedMap<K, V> {
+impl<K: Hash + Eq + Clone + Debug, V: Clone + Debug> std::default::Default for ScopedMap<K, V> {
     fn default() -> Self {
         ScopedMap::new()
     }
@@ -66,7 +63,7 @@ impl<K: Hash + Eq + Clone + Debug, V: Clone + Debug> ScopedMap<K, V> {
     /// Create an empty scoped hashmap.
     pub fn new() -> ScopedMap<K, V> {
         ScopedMap {
-            map: HashMap::default(),
+            map: FxHashMap::default(),
             gen: 0,
             gen_by_level: vec![0],
         }

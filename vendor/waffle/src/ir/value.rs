@@ -2,9 +2,8 @@ use super::{Block, Type, Value};
 use crate::pool::{ListPool, ListRef};
 use crate::Operator;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 /// A definition of an SSA value.
-
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ValueDef {
     /// This value is a block parameter of the given block, with the
     /// given parameter position/index, and the given type.
@@ -53,7 +52,7 @@ impl ValueDef {
             &ValueDef::Operator(_, _, tys) => &types[tys],
             &ValueDef::BlockParam(_, _, ref ty)
             | &ValueDef::PickOutput(_, _, ref ty)
-            | &ValueDef::Placeholder(ref ty) => core::slice::from_ref(ty),
+            | &ValueDef::Placeholder(ref ty) => std::slice::from_ref(ty),
             _ => &[],
         }
     }

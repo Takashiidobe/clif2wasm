@@ -1,19 +1,20 @@
 # Vendored waffle
 
-Source: <https://github.com/portal-co/waffle-> at release 0.5.5 (`ffb18b8`),
-the crate published as `portal-pc-waffle`. Upstream: <https://github.com/bytecodealliance/waffle>.
+Base: bytecodealliance/waffle `c466056` (0.3.2, wasmparser/wasm-encoder 0.248).
+Chosen over the portal-co fork for correctness (it has the multi-value call
+result order fix); the fork's extras are re-added here only as needed.
 
-Cherry-picked from upstream (`git cherry-pick -x` on top of 0.5.5, kept on a
-scratch branch and re-exported into this directory):
+## Local patches
 
-- `0f64d1b` fix multi-value operator result order (0.5.5 binds multi-value call
-  results in reverse)
-- `b5a7ed4` treeify soundness: never sink effectful ops (resolved by hand for the
-  fork's `.value` instruction wrapper)
-- `1b8bb98` resolve_aliases: resolve every terminator use
-- `f7fb3a8` backend: explicit stack instead of recursion
-- `31b85ce` make `passes::empty_blocks::run` public
+1. `pub mod backend` in `src/lib.rs` (clif2wasm drives `WasmFuncBackend`).
+2. Tail calls: `Terminator::ReturnCall` / `ReturnCallIndirect` in `src/ir/func.rs`,
+   decoded in `src/frontend.rs`, emitted in `src/backend/mod.rs`; the interpreter
+   does not support them.
+3. Atomics: 67 `Operator` variants carrying `memory: MemoryArg` in `src/ops.rs`,
+   wasmparser conversions, and `src/op_traits.rs` entries; frontend/backend arms.
+4. `MemoryData::shared`, decoded and emitted as the shared-memory flag.
 
-Local edits: `fuzz/` removed; `[lints]` in `Cargo.toml` silence warnings in this
-crate. `tests/roundtrip.rs` fails on `test4.wat` with the current `wat` crate
-("previous `if` had no `then`"); this is unrelated to the picks above.
+## Not ported
+
+memory64, `page_size_log2`, table64, GC/heap types, exception handling,
+`ReturnCallRef`, and the fork's extra passes. `MemoryArg.offset` is `u32`.

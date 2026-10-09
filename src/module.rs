@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::error::Result;
-use crate::{bail, ensure, unsupported};
+use crate::{ensure, unsupported};
 use cranelift_codegen::ir;
 use waffle::{FunctionBody, Operator, SignatureData, Terminator, Type};
 
@@ -196,12 +196,7 @@ pub(crate) fn intern_sig(
 }
 
 pub(crate) fn signature_parts(data: &SignatureData) -> Result<(&[Type], &[Type])> {
-    match data {
-        SignatureData::Func {
-            params, returns, ..
-        } => Ok((params, returns)),
-        _ => bail!("expected a function signature, got {data:?}"),
-    }
+    Ok((&data.params, &data.returns))
 }
 
 pub(crate) fn signature_data(sig: &ir::Signature) -> Result<SignatureData> {
@@ -228,9 +223,5 @@ pub(crate) fn signature_data(sig: &ir::Signature) -> Result<SignatureData> {
     for r in &sig.returns {
         returns.extend(expand_abi(r)?);
     }
-    Ok(SignatureData::Func {
-        params,
-        returns,
-        shared: false,
-    })
+    Ok(SignatureData { params, returns })
 }

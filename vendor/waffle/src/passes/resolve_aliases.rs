@@ -8,7 +8,7 @@ pub fn run(body: &mut FunctionBody) {
         body.display_verbose("| ", None),
     );
     for value in body.values.iter() {
-        let mut value_def = core::mem::take(&mut body.values[value]);
+        let mut value_def = std::mem::take(&mut body.values[value]);
         match &mut value_def {
             ValueDef::Operator(_, args, _) => {
                 for i in 0..args.len() {
@@ -27,7 +27,7 @@ pub fn run(body: &mut FunctionBody) {
         }
         body.values[value] = value_def;
     }
-    let mut blocks = core::mem::take(&mut body.blocks);
+    let mut blocks = std::mem::take(&mut body.blocks);
     for block in blocks.values_mut() {
         block.terminator.update_uses(|u| {
             *u = body.resolve_alias(*u);

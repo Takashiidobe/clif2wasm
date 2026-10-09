@@ -3,16 +3,16 @@
 use crate::cfg::CFGInfo;
 use crate::entity::EntityRef;
 use crate::ir::{ExportKind, FuncDecl, FunctionBody, ImportKind, Module, Type, Value, ValueDef};
-use crate::{HeapType, Operator, WithNullable};
+use crate::Operator;
 use anyhow::Result;
-// use rayon::prelude::*;
-use alloc::borrow::Cow;
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
-use wasm_encoder::Encode;
-use wasm_encoder::{CustomSection, TagType};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use std::borrow::Cow;
+use std::convert::TryFrom;
 
+pub(crate) mod bitset;
+pub(crate) mod cross_block_ids;
+pub(crate) mod dense_live_set;
 pub mod reducify;
 use reducify::Reducifier;
 pub mod stackify;
@@ -190,8 +190,7 @@ impl<'a> WasmFuncBackend<'a> {
                 ));
             }
             WasmBlock::Leaf { block } => {
-                for inst in &self.body.blocks[*block].insts {
-                    let inst = inst.value;
+                for &inst in &self.body.blocks[*block].insts {
                     // If this value is "owned", do nothing: it will be lowered in
                     // the one place it's used.
                     if ctx.trees.owner.contains_key(&inst) || ctx.trees.remat.contains(&inst) {
@@ -202,47 +201,9 @@ impl<'a> WasmFuncBackend<'a> {
                     }
                 }
             }
-            // WasmBlock::BlockParams { from, to } => {
-            //     debug_assert_eq!(from.len(), to.len());
-            //     for (&from, &(_, to)) in from.iter().zip(to.iter()) {
-            //         if self.locals.values[to].is_empty() {
-            //             continue;
-            //         }
-            //         self.lower_value(from, func);
-            //     }
-            //     for &(_, to) in to.iter().rev() {
-            //         if self.locals.values[to].is_empty() {
-            //             continue;
-            //         }
-            //         self.lower_set_value(to, func);
-            //     }
-            // }
-            WasmBlock::Return { values } => {
-                for &value in &values[..] {
-                    self.lower_value(ctx, value, func);
-                }
-                func.instruction(&wasm_encoder::Instruction::Return);
-            }
-            WasmBlock::ReturnCall { func: f, values } => {
-                for &value in &values[..] {
-                    self.lower_value(ctx, value, func);
-                }
-                func.instruction(&wasm_encoder::Instruction::ReturnCall(f.index() as u32));
-            }
-            WasmBlock::BlockParams { from, to, prefix } => {
-                debug_assert_eq!(from.len() + *prefix, to.len());
-                let mut iter = to.iter();
-                for _ in 0..*prefix {
-                    let &(to_ty, to) = iter.next().unwrap();
-                    if ctx.locals.values[to].is_empty() {
-                        continue;
-                    }
-                    if ctx.locals.values[to].len() == 1 {
-                        assert_eq!(to_ty, ctx.locals.locals[ctx.locals.values[to][0]]);
-                    }
-                    self.lower_set_value(ctx, to, func);
-                }
-                for (&from, &(to_ty, to)) in from.iter().zip(iter) {
+            WasmBlock::BlockParams { from, to } => {
+                debug_assert_eq!(from.len(), to.len());
+                for (&from, &(to_ty, to)) in from.iter().zip(to.iter()) {
                     if ctx.locals.values[to].is_empty() {
                         continue;
                     }
@@ -255,7 +216,7 @@ impl<'a> WasmFuncBackend<'a> {
                     }
                     self.lower_value(ctx, from, func);
                 }
-                for &(to_ty, to) in to.iter().skip(*prefix).rev() {
+                for &(to_ty, to) in to.iter().rev() {
                     if ctx.locals.values[to].is_empty() {
                         continue;
                     }
@@ -265,6 +226,18 @@ impl<'a> WasmFuncBackend<'a> {
                     self.lower_set_value(ctx, to, func);
                 }
             }
+            WasmBlock::Return { values } => {
+                for &value in &values[..] {
+                    self.lower_value(ctx, value, func);
+                }
+                func.instruction(&wasm_encoder::Instruction::Return);
+            }
+            WasmBlock::ReturnCall { func: f, values } => {
+                for &value in &values[..] {
+                    self.lower_value(ctx, value, func);
+                }
+                func.instruction(&wasm_encoder::Instruction::ReturnCall(f.index() as u32));
+            }
             WasmBlock::ReturnCallIndirect { sig, table, values } => {
                 for &value in &values[..] {
                     self.lower_value(ctx, value, func);
@@ -273,12 +246,6 @@ impl<'a> WasmFuncBackend<'a> {
                     type_index: sig.index() as u32,
                     table_index: table.index() as u32,
                 });
-            }
-            WasmBlock::ReturnCallRef { sig, values } => {
-                for &value in &values[..] {
-                    self.lower_value(ctx, value, func);
-                }
-                func.instruction(&wasm_encoder::Instruction::ReturnCallRef(sig.index() as u32));
             }
             WasmBlock::Unreachable => {
                 func.instruction(&wasm_encoder::Instruction::Unreachable);
@@ -302,7 +269,7 @@ impl<'a> WasmFuncBackend<'a> {
                 &ValueDef::PickOutput(orig_value, idx, _) => {
                     ctx.locals.values[orig_value][idx as usize]
                 }
-                _ => unreachable!(),
+                val => unreachable!("bad value ({}): {:?}", value, val),
             };
             func.instruction(&wasm_encoder::Instruction::LocalGet(local.index() as u32));
         }
@@ -457,6 +424,205 @@ impl<'a> WasmFuncBackend<'a> {
             Operator::I64Store32 { memory } => Some(wasm_encoder::Instruction::I64Store32(
                 wasm_encoder::MemArg::from(*memory),
             )),
+            Operator::MemoryAtomicNotify { memory } => Some(wasm_encoder::Instruction::MemoryAtomicNotify(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::MemoryAtomicWait32 { memory } => Some(wasm_encoder::Instruction::MemoryAtomicWait32(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::MemoryAtomicWait64 { memory } => Some(wasm_encoder::Instruction::MemoryAtomicWait64(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::AtomicFence => Some(wasm_encoder::Instruction::AtomicFence),
+            Operator::I32AtomicLoad { memory } => Some(wasm_encoder::Instruction::I32AtomicLoad(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicLoad { memory } => Some(wasm_encoder::Instruction::I64AtomicLoad(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicLoad8U { memory } => Some(wasm_encoder::Instruction::I32AtomicLoad8U(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicLoad16U { memory } => Some(wasm_encoder::Instruction::I32AtomicLoad16U(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicLoad8U { memory } => Some(wasm_encoder::Instruction::I64AtomicLoad8U(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicLoad16U { memory } => Some(wasm_encoder::Instruction::I64AtomicLoad16U(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicLoad32U { memory } => Some(wasm_encoder::Instruction::I64AtomicLoad32U(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicStore { memory } => Some(wasm_encoder::Instruction::I32AtomicStore(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicStore { memory } => Some(wasm_encoder::Instruction::I64AtomicStore(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicStore8 { memory } => Some(wasm_encoder::Instruction::I32AtomicStore8(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicStore16 { memory } => Some(wasm_encoder::Instruction::I32AtomicStore16(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicStore8 { memory } => Some(wasm_encoder::Instruction::I64AtomicStore8(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicStore16 { memory } => Some(wasm_encoder::Instruction::I64AtomicStore16(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicStore32 { memory } => Some(wasm_encoder::Instruction::I64AtomicStore32(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwAdd { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwAdd(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwAdd { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwAdd(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8AddU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8AddU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16AddU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16AddU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8AddU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8AddU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16AddU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16AddU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32AddU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32AddU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwSub { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwSub(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwSub { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwSub(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8SubU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8SubU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16SubU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16SubU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8SubU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8SubU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16SubU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16SubU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32SubU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32SubU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwAnd { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwAnd(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwAnd { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwAnd(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8AndU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8AndU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16AndU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16AndU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8AndU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8AndU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16AndU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16AndU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32AndU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32AndU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwOr { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwOr(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwOr { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwOr(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8OrU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8OrU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16OrU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16OrU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8OrU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8OrU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16OrU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16OrU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32OrU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32OrU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwXor { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwXor(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwXor { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwXor(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8XorU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8XorU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16XorU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16XorU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8XorU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8XorU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16XorU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16XorU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32XorU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32XorU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwXchg { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwXchg(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwXchg { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwXchg(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8XchgU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8XchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16XchgU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16XchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8XchgU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8XchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16XchgU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16XchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32XchgU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32XchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmwCmpxchg { memory } => Some(wasm_encoder::Instruction::I32AtomicRmwCmpxchg(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmwCmpxchg { memory } => Some(wasm_encoder::Instruction::I64AtomicRmwCmpxchg(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw8CmpxchgU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw8CmpxchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I32AtomicRmw16CmpxchgU { memory } => Some(wasm_encoder::Instruction::I32AtomicRmw16CmpxchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw8CmpxchgU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw8CmpxchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw16CmpxchgU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw16CmpxchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
+            Operator::I64AtomicRmw32CmpxchgU { memory } => Some(wasm_encoder::Instruction::I64AtomicRmw32CmpxchgU(
+                wasm_encoder::MemArg::from(*memory),
+            )),
 
             Operator::I32Const { value } => {
                 Some(wasm_encoder::Instruction::I32Const(*value as i32))
@@ -464,12 +630,12 @@ impl<'a> WasmFuncBackend<'a> {
             Operator::I64Const { value } => {
                 Some(wasm_encoder::Instruction::I64Const(*value as i64))
             }
-            Operator::F32Const { value } => {
-                Some(wasm_encoder::Instruction::F32Const(f32::from_bits(*value)))
-            }
-            Operator::F64Const { value } => {
-                Some(wasm_encoder::Instruction::F64Const(f64::from_bits(*value)))
-            }
+            Operator::F32Const { value } => Some(wasm_encoder::Instruction::F32Const(
+                f32::from_bits(*value).into(),
+            )),
+            Operator::F64Const { value } => Some(wasm_encoder::Instruction::F64Const(
+                f64::from_bits(*value).into(),
+            )),
 
             Operator::I32Eqz => op!(I32Eqz),
             Operator::I32Eq => op!(I32Eq),
@@ -1048,328 +1214,12 @@ impl<'a> WasmFuncBackend<'a> {
                 Some(wasm_encoder::Instruction::CallRef(sig_index.index() as u32))
             }
             Operator::RefIsNull => Some(wasm_encoder::Instruction::RefIsNull),
+            Operator::RefNull { sig_index } => Some(wasm_encoder::Instruction::RefNull(
+                wasm_encoder::HeapType::Concrete(sig_index.index() as u32),
+            )),
             Operator::RefFunc { func_index } => {
                 Some(wasm_encoder::Instruction::RefFunc(func_index.index() as u32))
             }
-            Operator::RefNull { ty } => {
-                let Type::Heap(h) = ty else { todo!() };
-                let h: wasm_encoder::RefType = h.clone().into();
-                Some(wasm_encoder::Instruction::RefNull(h.heap_type))
-            }
-            Operator::MemoryAtomicNotify { memarg } => Some(
-                wasm_encoder::Instruction::MemoryAtomicNotify(memarg.clone().into()),
-            ),
-            Operator::MemoryAtomicWait32 { memarg } => Some(
-                wasm_encoder::Instruction::MemoryAtomicWait32(memarg.clone().into()),
-            ),
-            Operator::MemoryAtomicWait64 { memarg } => Some(
-                wasm_encoder::Instruction::MemoryAtomicWait64(memarg.clone().into()),
-            ),
-            Operator::AtomicFence => Some(wasm_encoder::Instruction::AtomicFence),
-            Operator::I32AtomicLoad { memarg } => Some(wasm_encoder::Instruction::I32AtomicLoad(
-                memarg.clone().into(),
-            )),
-            Operator::I64AtomicLoad { memarg } => Some(wasm_encoder::Instruction::I64AtomicLoad(
-                memarg.clone().into(),
-            )),
-            Operator::I32AtomicLoad8U { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicLoad8U(memarg.clone().into()),
-            ),
-            Operator::I32AtomicLoad16U { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicLoad16U(memarg.clone().into()),
-            ),
-            Operator::I64AtomicLoad8U { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicLoad8U(memarg.clone().into()),
-            ),
-            Operator::I64AtomicLoad16U { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicLoad16U(memarg.clone().into()),
-            ),
-            Operator::I64AtomicLoad32U { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicLoad32U(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicStore { memarg } => todo!(),
-            // Operator::I64AtomicStore { memarg } => todo!(),
-            // Operator::I32AtomicStore8 { memarg } => todo!(),
-            // Operator::I32AtomicStore16 { memarg } => todo!(),
-            // Operator::I64AtomicStore8 { memarg } => todo!(),
-            // Operator::I64AtomicStore16 { memarg } => todo!(),
-            // Operator::I64AtomicStore32 { memarg } => todo!(),
-            Operator::I32AtomicStore { memarg } => Some(wasm_encoder::Instruction::I32AtomicStore(
-                memarg.clone().into(),
-            )),
-            Operator::I64AtomicStore { memarg } => Some(wasm_encoder::Instruction::I64AtomicStore(
-                memarg.clone().into(),
-            )),
-            Operator::I32AtomicStore8 { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicStore8(memarg.clone().into()),
-            ),
-            Operator::I32AtomicStore16 { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicStore16(memarg.clone().into()),
-            ),
-            Operator::I64AtomicStore8 { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicStore8(memarg.clone().into()),
-            ),
-            Operator::I64AtomicStore16 { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicStore16(memarg.clone().into()),
-            ),
-            Operator::I64AtomicStore32 { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicStore32(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmwAdd { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmwAdd(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmwAdd { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmwAdd(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw8AddU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8AddU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16AddU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16AddU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8AddU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8AddU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16AddU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16AddU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32AddU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32AddU(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicRmwSub { memarg } => todo!(),
-            // Operator::I64AtomicRmwSub { memarg } => todo!(),
-            // Operator::I32AtomicRmw8SubU { memarg } => todo!(),
-            // Operator::I32AtomicRmw16SubU { memarg } => todo!(),
-            // Operator::I64AtomicRmw8SubU { memarg } => todo!(),
-            // Operator::I64AtomicRmw16SubU { memarg } => todo!(),
-            // Operator::I64AtomicRmw32SubU { memarg } => todo!(),
-            Operator::I32AtomicRmwSub { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmwSub(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmwSub { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmwSub(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw8SubU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8SubU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16SubU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16SubU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8SubU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8SubU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16SubU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16SubU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32SubU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32SubU(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicRmwAnd { memarg } => todo!(),
-            // Operator::I64AtomicRmwAnd { memarg } => todo!(),
-            // Operator::I32AtomicRmw8AndU { memarg } => todo!(),
-            // Operator::I32AtomicRmw16AndU { memarg } => todo!(),
-            // Operator::I64AtomicRmw8AndU { memarg } => todo!(),
-            // Operator::I64AtomicRmw16AndU { memarg } => todo!(),
-            // Operator::I64AtomicRmw32AndU { memarg } => todo!(),
-            Operator::I32AtomicRmwAnd { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmwAnd(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmwAnd { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmwAnd(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw8AndU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8AndU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16AndU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16AndU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8AndU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8AndU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16AndU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16AndU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32AndU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32AndU(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicRmwOr { memarg } => todo!(),
-            // Operator::I64AtomicRmwOr { memarg } => todo!(),
-            // Operator::I32AtomicRmw8OrU { memarg } => todo!(),
-            // Operator::I32AtomicRmw16OrU { memarg } => todo!(),
-            // Operator::I64AtomicRmw8OrU { memarg } => todo!(),
-            // Operator::I64AtomicRmw16OrU { memarg } => todo!(),
-            // Operator::I64AtomicRmw32OrU { memarg } => todo!(),
-            Operator::I32AtomicRmwOr { memarg } => Some(wasm_encoder::Instruction::I32AtomicRmwOr(
-                memarg.clone().into(),
-            )),
-            Operator::I64AtomicRmwOr { memarg } => Some(wasm_encoder::Instruction::I64AtomicRmwOr(
-                memarg.clone().into(),
-            )),
-            Operator::I32AtomicRmw8OrU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8OrU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16OrU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16OrU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8OrU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8OrU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16OrU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16OrU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32OrU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32OrU(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicRmwXor { memarg } => todo!(),
-            // Operator::I64AtomicRmwXor { memarg } => todo!(),
-            // Operator::I32AtomicRmw8XorU { memarg } => todo!(),
-            // Operator::I32AtomicRmw16XorU { memarg } => todo!(),
-            // Operator::I64AtomicRmw8XorU { memarg } => todo!(),
-            // Operator::I64AtomicRmw16XorU { memarg } => todo!(),
-            // Operator::I64AtomicRmw32XorU { memarg } => todo!(),
-            Operator::I32AtomicRmwXor { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmwXor(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmwXor { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmwXor(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw8XorU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8XorU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16XorU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16XorU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8XorU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8XorU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16XorU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16XorU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32XorU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32XorU(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicRmwXchg { memarg } => todo!(),
-            // Operator::I64AtomicRmwXchg { memarg } => todo!(),
-            // Operator::I32AtomicRmw8XchgU { memarg } => todo!(),
-            // Operator::I32AtomicRmw16XchgU { memarg } => todo!(),
-            // Operator::I64AtomicRmw8XchgU { memarg } => todo!(),
-            // Operator::I64AtomicRmw16XchgU { memarg } => todo!(),
-            // Operator::I64AtomicRmw32XchgU { memarg } => todo!(),
-            Operator::I32AtomicRmwXchg { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmwXchg(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmwXchg { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmwXchg(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw8XchgU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8XchgU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16XchgU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16XchgU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8XchgU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8XchgU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16XchgU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16XchgU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32XchgU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32XchgU(memarg.clone().into()),
-            ),
-            // Operator::I32AtomicRmwCmpxchg { memarg } => todo!(),
-            // Operator::I64AtomicRmwCmpxchg { memarg } => todo!(),
-            // Operator::I32AtomicRmw8CmpxchgU { memarg } => todo!(),
-            // Operator::I32AtomicRmw16CmpxchgU { memarg } => todo!(),
-            // Operator::I64AtomicRmw8CmpxchgU { memarg } => todo!(),
-            // Operator::I64AtomicRmw16CmpxchgU { memarg } => todo!(),
-            // Operator::I64AtomicRmw32CmpxchgU { memarg } => todo!(),
-            Operator::I32AtomicRmwCmpxchg { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmwCmpxchg(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmwCmpxchg { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmwCmpxchg(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw8CmpxchgU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw8CmpxchgU(memarg.clone().into()),
-            ),
-            Operator::I32AtomicRmw16CmpxchgU { memarg } => Some(
-                wasm_encoder::Instruction::I32AtomicRmw16CmpxchgU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw8CmpxchgU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw8CmpxchgU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw16CmpxchgU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw16CmpxchgU(memarg.clone().into()),
-            ),
-            Operator::I64AtomicRmw32CmpxchgU { memarg } => Some(
-                wasm_encoder::Instruction::I64AtomicRmw32CmpxchgU(memarg.clone().into()),
-            ),
-            Operator::StructNew { sig } => {
-                Some(wasm_encoder::Instruction::StructNew(sig.index() as u32))
-            }
-            Operator::StructGet { sig, idx } => Some(wasm_encoder::Instruction::StructGet {
-                struct_type_index: sig.index() as u32,
-                field_index: *idx as u32,
-            }),
-            Operator::StructSet { sig, idx } => Some(wasm_encoder::Instruction::StructSet {
-                struct_type_index: sig.index() as u32,
-                field_index: *idx as u32,
-            }),
-            Operator::ArrayNew { sig } => {
-                Some(wasm_encoder::Instruction::ArrayNew(sig.index() as u32))
-            }
-            Operator::ArrayNewFixed { sig, num } => {
-                Some(wasm_encoder::Instruction::ArrayNewFixed {
-                    array_type_index: sig.index() as u32,
-                    array_size: *num as u32,
-                })
-            }
-            Operator::ArrayGet { sig } => {
-                Some(wasm_encoder::Instruction::ArrayGet(sig.index() as u32))
-            }
-            Operator::ArraySet { sig } => {
-                Some(wasm_encoder::Instruction::ArraySet(sig.index() as u32))
-            }
-            Operator::ArrayFill { sig } => {
-                Some(wasm_encoder::Instruction::ArrayFill(sig.index() as u32))
-            }
-            Operator::ArrayCopy { dest, src } => Some(wasm_encoder::Instruction::ArrayCopy {
-                array_type_index_dst: dest.index() as u32,
-                array_type_index_src: src.index() as u32,
-            }),
-            Operator::ArrayLen => Some(wasm_encoder::Instruction::ArrayLen),
-            Operator::RefCast { ty } => Some(match ty {
-                Type::Heap(h) => {
-                    if h.nullable {
-                        wasm_encoder::Instruction::RefCastNullable({
-                            let t: wasm_encoder::RefType = h.clone().into();
-                            t.heap_type
-                        })
-                    } else {
-                        wasm_encoder::Instruction::RefCastNonNull({
-                            let t: wasm_encoder::RefType = h.clone().into();
-                            t.heap_type
-                        })
-                    }
-                }
-                _ => todo!(),
-            }),
-            Operator::RefTest { ty } => Some(match ty {
-                Type::Heap(h) => {
-                    if h.nullable {
-                        wasm_encoder::Instruction::RefTestNullable({
-                            let t: wasm_encoder::RefType = h.clone().into();
-                            t.heap_type
-                        })
-                    } else {
-                        wasm_encoder::Instruction::RefTestNonNull({
-                            let t: wasm_encoder::RefType = h.clone().into();
-                            t.heap_type
-                        })
-                    }
-                }
-                _ => todo!(),
-            }),
         };
 
         if let Some(inst) = inst {
@@ -1378,37 +1228,20 @@ impl<'a> WasmFuncBackend<'a> {
     }
 }
 
-pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
+pub fn compile(module: &Module<'_>) -> anyhow::Result<Vec<u8>> {
     let mut into_mod = wasm_encoder::Module::new();
 
     let mut types = wasm_encoder::TypeSection::new();
-    let recurses = module.signatures.iter().any(|s| s.is_backref(module));
-    if recurses {
-        let mut v: Vec<wasm_encoder::SubType> = vec![];
-        for sig_data in module.signatures.values() {
-            // let params = sig_data
-            //     .params
-            //     .iter()
-            //     .map(|&ty| wasm_encoder::ValType::from(ty));
-            // let returns = sig_data
-            //     .returns
-            //     .iter()
-            //     .map(|&ty| wasm_encoder::ValType::from(ty));
-            v.push(sig_data.into());
-        }
-        types.ty().rec(v);
-    } else {
-        for sig_data in module.signatures.values() {
-            // let params = sig_data
-            //     .params
-            //     .iter()
-            //     .map(|&ty| wasm_encoder::ValType::from(ty));
-            // let returns = sig_data
-            //     .returns
-            //     .iter()
-            //     .map(|&ty| wasm_encoder::ValType::from(ty));
-            types.ty().subtype(&sig_data.into());
-        }
+    for sig_data in module.signatures.values() {
+        let params = sig_data
+            .params
+            .iter()
+            .map(|&ty| wasm_encoder::ValType::from(ty));
+        let returns = sig_data
+            .returns
+            .iter()
+            .map(|&ty| wasm_encoder::ValType::from(ty));
+        types.ty().function(params, returns);
     }
     into_mod.section(&types);
 
@@ -1417,7 +1250,6 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
     let mut num_table_imports = 0;
     let mut num_global_imports = 0;
     let mut num_mem_imports = 0;
-    let mut num_tag_imports = 0;
     for import in &module.imports {
         let entity = match &import.kind {
             &ImportKind::Func(func) => {
@@ -1429,17 +1261,10 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
                 num_table_imports += 1;
                 let table = &module.tables[table];
                 wasm_encoder::EntityType::Table(wasm_encoder::TableType {
-                    element_type: match table.ty {
-                        Type::Heap(h) => h.into(),
-                        _ => todo!(),
-                    },
-                    minimum: table
-                        .func_elements
-                        .as_ref()
-                        .map(|elts| elts.len() as u64)
-                        .unwrap_or(table.initial),
+                    element_type: wasm_encoder::RefType::from(table.ty),
+                    minimum: table.initial,
                     maximum: table.max,
-                    table64: table.table64,
+                    table64: false,
                     shared: false,
                 })
             }
@@ -1456,22 +1281,13 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
                 num_mem_imports += 1;
                 let mem = &module.memories[mem];
                 wasm_encoder::EntityType::Memory(wasm_encoder::MemoryType {
-                    memory64: mem.memory64,
+                    memory64: false,
                     shared: mem.shared,
                     minimum: mem.initial_pages as u64,
                     maximum: mem.maximum_pages.map(|val| val as u64),
                     page_size_log2: None,
                 })
             }
-            &ImportKind::ControlTag(control_tag) => {
-                num_tag_imports += 1;
-                let tag = &module.control_tags[control_tag];
-                wasm_encoder::EntityType::Tag(wasm_encoder::TagType {
-                    kind: wasm_encoder::TagKind::Exception,
-                    func_type_idx: tag.sig.index() as u32,
-                })
-            }
-            &ImportKind::Type(ty) => todo!(),
         };
         imports.import(&import.module[..], &import.name[..], entity);
     }
@@ -1495,17 +1311,10 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
     let mut tables = wasm_encoder::TableSection::new();
     for table_data in module.tables.values().skip(num_table_imports) {
         tables.table(wasm_encoder::TableType {
-            element_type: match table_data.ty {
-                Type::Heap(h) => h.into(),
-                _ => todo!(),
-            },
-            minimum: table_data
-                .func_elements
-                .as_ref()
-                .map(|elt| elt.len())
-                .unwrap_or(0) as u64,
+            element_type: wasm_encoder::RefType::from(table_data.ty),
+            minimum: table_data.initial,
             maximum: table_data.max,
-            table64: table_data.table64,
+            table64: false,
             shared: false,
         });
     }
@@ -1516,22 +1325,12 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
         memories.memory(wasm_encoder::MemoryType {
             minimum: mem_data.initial_pages as u64,
             maximum: mem_data.maximum_pages.map(|val| val as u64),
-            memory64: mem_data.memory64,
+            memory64: false,
             shared: mem_data.shared,
-            page_size_log2: mem_data.page_size_log2,
+            page_size_log2: None,
         });
     }
     into_mod.section(&memories);
-    if module.control_tags.len() != 0 {
-        let mut tags = wasm_encoder::TagSection::new();
-        for tag_data in module.control_tags.values().skip(num_tag_imports) {
-            tags.tag(TagType {
-                kind: wasm_encoder::TagKind::Exception,
-                func_type_idx: tag_data.sig.index() as u32,
-            });
-        }
-        into_mod.section(&tags);
-    }
 
     let mut globals = wasm_encoder::GlobalSection::new();
     for global_data in module.globals.values().skip(num_global_imports) {
@@ -1577,14 +1376,6 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
                     global.index() as u32,
                 );
             }
-            ExportKind::ControlTag(control_tag) => {
-                exports.export(
-                    &export.name[..],
-                    wasm_encoder::ExportKind::Tag,
-                    control_tag.index() as u32,
-                );
-            }
-            &ExportKind::Type(ty) => todo!(),
         }
     }
     into_mod.section(&exports);
@@ -1601,31 +1392,31 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
         if let Some(elts) = &table_data.func_elements {
             for (i, &elt) in elts.iter().enumerate() {
                 if elt.is_valid() {
-                    if let Type::Heap(h) = &table_data.ty {
-                        match &h.value {
-                            HeapType::FuncRef => {
-                                elem.active(
-                                    Some(table.index() as u32),
-                                    &wasm_encoder::ConstExpr::i32_const(i as i32),
-                                    wasm_encoder::Elements::Functions(Cow::Borrowed(&[
-                                        elt.index() as u32,
-                                    ])),
-                                );
-                            }
-                            HeapType::Sig { .. } => {
-                                elem.active(
-                                    Some(table.index() as u32),
-                                    &wasm_encoder::ConstExpr::i32_const(i as i32),
-                                    wasm_encoder::Elements::Expressions(
-                                        h.clone().into(),
-                                        Cow::Borrowed(&[wasm_encoder::ConstExpr::ref_func(
-                                            elt.index() as u32,
-                                        )]),
-                                    ),
-                                );
-                            }
-                            _ => unreachable!(),
+                    match table_data.ty {
+                        Type::FuncRef => {
+                            elem.active(
+                                Some(table.index() as u32),
+                                &wasm_encoder::ConstExpr::i32_const(i as i32),
+                                wasm_encoder::Elements::Functions(std::borrow::Cow::Borrowed(&[
+                                    u32::try_from(elt.index()).unwrap(),
+                                ])),
+                            );
                         }
+                        Type::TypedFuncRef(..) => {
+                            elem.active(
+                                Some(table.index() as u32),
+                                &wasm_encoder::ConstExpr::i32_const(i as i32),
+                                wasm_encoder::Elements::Expressions(
+                                    table_data.ty.into(),
+                                    std::borrow::Cow::Borrowed(&[
+                                        wasm_encoder::ConstExpr::ref_func(
+                                            u32::try_from(elt.index()).unwrap(),
+                                        ),
+                                    ]),
+                                ),
+                            );
+                        }
+                        _ => unreachable!(),
                     }
                 }
             }
@@ -1635,12 +1426,16 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
 
     let mut code = wasm_encoder::CodeSection::new();
 
-    let bodies = module
+    let entries = module
         .funcs
         .entries()
         .skip(num_func_imports)
-        .collect::<Vec<_>>()
-        .iter()
+        .collect::<Vec<_>>();
+    #[cfg(feature = "parallel")]
+    let iter = entries.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let iter = entries.iter();
+    let bodies = iter
         .map(|(func, func_decl)| -> Result<_> {
             match func_decl {
                 FuncDecl::Lazy(_, _name, reader) => {
@@ -1683,14 +1478,15 @@ pub fn compile(module: &Module<'_>) -> anyhow::Result<wasm_encoder::Module> {
     names.functions(&func_names);
     into_mod.section(&names);
 
-    for (n, e) in module.custom_sections.iter() {
-        into_mod.section(&CustomSection {
-            name: Cow::Borrowed(n.as_str()),
-            data: Cow::Borrowed(e),
-        });
+    for (custom_name, &custom_data) in &module.custom_sections {
+        let section = wasm_encoder::CustomSection {
+            name: custom_name.into(),
+            data: custom_data.into(),
+        };
+        into_mod.section(&section);
     }
 
-    Ok(into_mod)
+    Ok(into_mod.finish())
 }
 
 fn const_init(ty: Type, value: Option<u64>) -> wasm_encoder::ConstExpr {
@@ -1698,8 +1494,12 @@ fn const_init(ty: Type, value: Option<u64>) -> wasm_encoder::ConstExpr {
     match ty {
         Type::I32 => wasm_encoder::ConstExpr::i32_const(bits as u32 as i32),
         Type::I64 => wasm_encoder::ConstExpr::i64_const(bits as i64),
-        Type::F32 => wasm_encoder::ConstExpr::f32_const(f32::from_bits(bits as u32)),
-        Type::F64 => wasm_encoder::ConstExpr::f64_const(f64::from_bits(bits as u64)),
+        Type::F32 => wasm_encoder::ConstExpr::f32_const(f32::from_bits(bits as u32).into()),
+        Type::F64 => wasm_encoder::ConstExpr::f64_const(f64::from_bits(bits as u64).into()),
+        Type::TypedFuncRef(true, sig) if bits == 0 => {
+            let hty = wasm_encoder::HeapType::Concrete(sig);
+            wasm_encoder::ConstExpr::ref_null(hty)
+        }
         _ => unimplemented!(),
     }
 }

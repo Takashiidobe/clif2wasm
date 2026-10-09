@@ -194,12 +194,7 @@ pub(crate) fn link(rel: &Relocatable, opts: &LinkOptions) -> Result<Vec<u8>> {
 
     let mut types = TypeSection::new();
     for sd in &rel.signatures {
-        let SignatureData::Func {
-            params, returns, ..
-        } = sd
-        else {
-            bail!("non-function type in module signatures: {sd:?}");
-        };
+        let SignatureData { params, returns } = sd;
         types.ty().function(
             params
                 .iter()
@@ -325,9 +320,7 @@ pub(crate) fn link(rel: &Relocatable, opts: &LinkOptions) -> Result<Vec<u8>> {
             initial_pages: 1,
             maximum_pages: None,
             segments: vec![],
-            memory64: false,
             shared: shared_memory,
-            page_size_log2: None,
         });
         for lc in &rel.libcalls {
             let sig = scratch

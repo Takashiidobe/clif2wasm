@@ -7,15 +7,12 @@ use crate::errors::FrontendError;
 use crate::ir::*;
 use crate::op_traits::{op_inputs, op_outputs};
 use crate::ops::Operator;
-// use addr2line::gimli;
-use alloc::borrow::ToOwned;
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(feature = "dwarf")]
+use addr2line::gimli;
 use anyhow::{bail, Result};
-use core::convert::TryFrom;
-use hashbrown::{HashMap as FxHashMap, HashSet as FxHashSet};
+use fxhash::{FxHashMap, FxHashSet};
 use log::trace;
+use std::convert::TryFrom;
 use wasmparser::{BlockType, DataKind, ExternalKind, KnownCustom, Name, Parser, Payload, TypeRef};
 
 /// Options to control the Wasm-to-bytecode translation process.
@@ -31,27 +28,37 @@ pub(crate) fn wasm_to_ir<'a>(bytes: &'a [u8], options: &FrontendOptions) -> Resu
     let mut module = Module::with_orig_bytes(bytes);
     let parser = Parser::new(0);
     let mut next_func = 0;
-    // let mut dwarf = gimli::Dwarf::default();
+    #[cfg(feature = "dwarf")]
+    let mut dwarf = gimli::Dwarf::default();
     let mut extra_sections = ExtraSections::default();
     for payload in parser.parse_all(bytes) {
-        let payload = payload.map_err(|e| anyhow::Error::from(e))?;
+        let payload = payload?;
         handle_payload(
             &mut module,
             payload,
             &mut next_func,
-            // &mut dwarf,
+            #[cfg(feature = "dwarf")]
+            &mut dwarf,
             &mut extra_sections,
         )?;
     }
-    // dwarf.locations =
-    //     gimli::LocationLists::new(extra_sections.debug_loc, extra_sections.debug_loclists);
-    // dwarf.ranges =
-    //     gimli::RangeLists::new(extra_sections.debug_ranges, extra_sections.debug_rnglists);
+    #[cfg(feature = "dwarf")]
+    {
+        dwarf.locations =
+            gimli::LocationLists::new(extra_sections.debug_loc, extra_sections.debug_loclists);
+        dwarf.ranges =
+            gimli::RangeLists::new(extra_sections.debug_ranges, extra_sections.debug_rnglists);
 
-    // if options.debug {
-    //     let debug_map = DebugMap::from_dwarf(dwarf, &mut module.debug, extra_sections.code_offset)?;
-    //     module.debug_map = debug_map;
-    // }
+        if options.debug {
+            let debug_map =
+                DebugMap::from_dwarf(dwarf, &mut module.debug, extra_sections.code_offset)?;
+            module.debug_map = debug_map;
+        }
+    }
+    #[cfg(not(feature = "dwarf"))]
+    {
+        let _ = options.debug;
+    }
 
     Ok(module)
 }
@@ -83,100 +90,120 @@ fn parse_init_expr<'a>(init_expr: &wasmparser::ConstExpr<'a>) -> Result<Option<u
 }
 
 #[derive(Default)]
-struct ExtraSections {
-    // debug_loc: gimli::DebugLoc<gimli::EndianSlice<'a, gimli::LittleEndian>>,
-    // debug_loclists: gimli::DebugLocLists<gimli::EndianSlice<'a, gimli::LittleEndian>>,
-    // debug_ranges: gimli::DebugRanges<gimli::EndianSlice<'a, gimli::LittleEndian>>,
-    // debug_rnglists: gimli::DebugRngLists<gimli::EndianSlice<'a, gimli::LittleEndian>>,
+struct ExtraSections<'a> {
+    #[cfg(feature = "dwarf")]
+    debug_loc: gimli::DebugLoc<gimli::EndianSlice<'a, gimli::LittleEndian>>,
+    #[cfg(feature = "dwarf")]
+    debug_loclists: gimli::DebugLocLists<gimli::EndianSlice<'a, gimli::LittleEndian>>,
+    #[cfg(feature = "dwarf")]
+    debug_ranges: gimli::DebugRanges<gimli::EndianSlice<'a, gimli::LittleEndian>>,
+    #[cfg(feature = "dwarf")]
+    debug_rnglists: gimli::DebugRngLists<gimli::EndianSlice<'a, gimli::LittleEndian>>,
     code_offset: u32,
+    #[cfg(not(feature = "dwarf"))]
+    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 fn handle_payload<'a>(
     module: &mut Module<'a>,
     payload: Payload<'a>,
     next_func: &mut usize,
-    // dwarf: &mut gimli::Dwarf<gimli::EndianSlice<'a, gimli::LittleEndian>>,
-    extra_sections: &mut ExtraSections,
+    #[cfg(feature = "dwarf")] dwarf: &mut gimli::Dwarf<gimli::EndianSlice<'a, gimli::LittleEndian>>,
+    extra_sections: &mut ExtraSections<'a>,
 ) -> Result<()> {
     trace!("Wasm parser item: {:?}", payload);
     match payload {
         Payload::TypeSection(reader) => {
             for rec_group in reader {
                 for ty in rec_group?.into_types() {
-                    // match &ty.composite_type {
-                    //     wasmparser::CompositeType::Func(fty) => {
-                    module.signatures.push((&ty).into());
-                    //     }
-                    //     _ => bail!(FrontendError::UnsupportedFeature(
-                    //         "non-function type in type section".into()
-                    //     )),
-                    // }
+                    match &ty.composite_type.inner {
+                        wasmparser::CompositeInnerType::Func(fty) => {
+                            module.signatures.push(fty.into());
+                        }
+                        _ => bail!(FrontendError::UnsupportedFeature(
+                            "non-function type in type section".into()
+                        )),
+                    }
                 }
             }
         }
         Payload::ImportSection(reader) => {
-            for import in reader {
-                let import = import?;
-                let module_name = import.module.to_owned();
-                let name = import.name.to_owned();
-                let kind = match import.ty {
-                    TypeRef::Func(sig_idx) => {
-                        let func = module
-                            .funcs
-                            .push(FuncDecl::Import(Signature::from(sig_idx), "".to_owned()));
-                        *next_func += 1;
-                        ImportKind::Func(func)
-                    }
-                    TypeRef::Global(ty) => {
-                        let mutable = ty.mutable;
-                        let ty = ty.content_type.into();
-                        let global = module.globals.push(GlobalData {
-                            ty,
-                            value: None,
-                            mutable,
-                        });
-                        ImportKind::Global(global)
-                    }
-                    TypeRef::Table(ty) => {
-                        let table = module.tables.push(TableData {
-                            ty: Type::Heap(ty.element_type.into()),
-                            initial: ty.initial,
-                            max: ty.maximum,
-                            func_elements: Some(vec![]),
-                            table64: ty.table64,
-                        });
-                        ImportKind::Table(table)
-                    }
-                    TypeRef::Memory(mem) => {
-                        let mem = module.memories.push(MemoryData {
-                            initial_pages: mem.initial as usize,
-                            maximum_pages: mem.maximum.map(|max| max as usize),
-                            segments: vec![],
-                            memory64: mem.memory64,
-                            shared: mem.shared,
-                            page_size_log2: mem.page_size_log2,
-                        });
-                        ImportKind::Memory(mem)
-                    }
-                    TypeRef::Tag(tag) => {
-                        let tag = module.control_tags.push(ControlTagData {
-                            sig: Signature::new(tag.func_type_idx as usize),
-                        });
-                        ImportKind::ControlTag(tag)
-                    }
-
-                    t => {
-                        bail!(FrontendError::UnsupportedFeature(format!(
-                            "Unknown import type: {:?}",
-                            t
-                        )));
-                    }
+            for imports in reader {
+                let imports = imports?;
+                let mut handle = |module_name: &str, name: &str, ty: TypeRef| -> Result<()> {
+                    let module_name = module_name.to_owned();
+                    let name = name.to_owned();
+                    let kind = match ty {
+                        TypeRef::Func(sig_idx) | TypeRef::FuncExact(sig_idx) => {
+                            let func = module
+                                .funcs
+                                .push(FuncDecl::Import(Signature::from(sig_idx), "".to_owned()));
+                            *next_func += 1;
+                            ImportKind::Func(func)
+                        }
+                        TypeRef::Global(ty) => {
+                            let mutable = ty.mutable;
+                            let ty = ty.content_type.into();
+                            let global = module.globals.push(GlobalData {
+                                ty,
+                                value: None,
+                                mutable,
+                            });
+                            ImportKind::Global(global)
+                        }
+                        TypeRef::Table(ty) => {
+                            let table = module.tables.push(TableData {
+                                ty: ty.element_type.into(),
+                                initial: ty.initial,
+                                max: ty.maximum,
+                                func_elements: Some(vec![]),
+                            });
+                            ImportKind::Table(table)
+                        }
+                        TypeRef::Memory(mem) => {
+                            let mem = module.memories.push(MemoryData {
+                                initial_pages: mem.initial as usize,
+                                maximum_pages: mem.maximum.map(|max| max as usize),
+                                segments: vec![],
+                                shared: mem.shared,
+                            });
+                            ImportKind::Memory(mem)
+                        }
+                        t => {
+                            bail!(FrontendError::UnsupportedFeature(format!(
+                                "Unknown import type: {:?}",
+                                t
+                            )));
+                        }
+                    };
+                    module.imports.push(Import {
+                        module: module_name,
+                        name,
+                        kind,
+                    });
+                    Ok(())
                 };
-                module.imports.push(Import {
-                    module: module_name,
-                    name,
-                    kind,
-                });
+                match imports {
+                    wasmparser::Imports::Single(_, import) => {
+                        handle(import.module, import.name, import.ty)?;
+                    }
+                    wasmparser::Imports::Compact1 { module: m, items } => {
+                        for item in items {
+                            let item = item?;
+                            handle(m, item.name, item.ty)?;
+                        }
+                    }
+                    wasmparser::Imports::Compact2 {
+                        module: m,
+                        ty,
+                        names,
+                    } => {
+                        for name in names {
+                            let name = name?;
+                            handle(m, name, ty)?;
+                        }
+                    }
+                }
             }
         }
         Payload::GlobalSection(reader) => {
@@ -196,11 +223,10 @@ fn handle_payload<'a>(
             for table in reader {
                 let table = table?;
                 module.tables.push(TableData {
-                    ty: Type::Heap(table.ty.element_type.into()),
+                    ty: table.ty.element_type.into(),
                     initial: table.ty.initial,
                     max: table.ty.maximum,
                     func_elements: Some(vec![]),
-                    table64: table.ty.table64,
                 });
             }
         }
@@ -234,9 +260,6 @@ fn handle_payload<'a>(
                     ExternalKind::Table => Some(ExportKind::Table(Table::from(export.index))),
                     ExternalKind::Global => Some(ExportKind::Global(Global::from(export.index))),
                     ExternalKind::Memory => Some(ExportKind::Memory(Memory::from(export.index))),
-                    ExternalKind::Tag => {
-                        Some(ExportKind::ControlTag(ControlTag::from(export.index)))
-                    }
                     _ => None,
                 };
                 if let Some(kind) = kind {
@@ -251,17 +274,7 @@ fn handle_payload<'a>(
                     initial_pages: memory.initial as usize,
                     maximum_pages: memory.maximum.map(|max| max as usize),
                     segments: vec![],
-                    memory64: memory.memory64,
                     shared: memory.shared,
-                    page_size_log2: memory.page_size_log2,
-                });
-            }
-        }
-        Payload::TagSection(reader) => {
-            for tag in reader {
-                let tag = tag?;
-                module.control_tags.push(ControlTagData {
-                    sig: Signature::new(tag.func_type_idx as usize),
                 });
             }
         }
@@ -284,69 +297,100 @@ fn handle_payload<'a>(
                 }
             }
         }
-        Payload::CustomSection(reader) => match reader.as_known() {
-            KnownCustom::Name(name_reader) => {
-                for subsection in name_reader {
-                    let subsection = subsection?;
-                    match subsection {
-                        Name::Function(names) => {
-                            for name in names {
-                                let name = name?;
-                                module.funcs[Func::new(name.index as usize)].set_name(name.name);
+        Payload::CustomSection(reader) => {
+            let handled = match reader.as_known() {
+                KnownCustom::Name(name_reader) => {
+                    for subsection in name_reader {
+                        let subsection = subsection?;
+                        match subsection {
+                            Name::Function(names) => {
+                                for name in names {
+                                    let name = name?;
+                                    module.funcs[Func::new(name.index as usize)]
+                                        .set_name(name.name);
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                    true
+                }
+                KnownCustom::Unknown => {
+                    #[cfg(feature = "dwarf")]
+                    {
+                        if reader.name() == ".debug_info" {
+                            dwarf.debug_info =
+                                gimli::DebugInfo::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_abbrev" {
+                            dwarf.debug_abbrev =
+                                gimli::DebugAbbrev::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_addr" {
+                            dwarf.debug_addr = gimli::DebugAddr::from(gimli::EndianSlice::new(
+                                reader.data(),
+                                gimli::LittleEndian,
+                            ));
+                            true
+                        } else if reader.name() == ".debug_aranges" {
+                            dwarf.debug_aranges =
+                                gimli::DebugAranges::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_line" {
+                            dwarf.debug_line =
+                                gimli::DebugLine::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_line_str" {
+                            dwarf.debug_line_str =
+                                gimli::DebugLineStr::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_str" {
+                            dwarf.debug_str =
+                                gimli::DebugStr::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_str_offsets" {
+                            dwarf.debug_str_offsets = gimli::DebugStrOffsets::from(
+                                gimli::EndianSlice::new(reader.data(), gimli::LittleEndian),
+                            );
+                            true
+                        } else if reader.name() == ".debug_types" {
+                            dwarf.debug_types =
+                                gimli::DebugTypes::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_loc" {
+                            extra_sections.debug_loc =
+                                gimli::DebugLoc::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_loclists" {
+                            extra_sections.debug_loclists =
+                                gimli::DebugLocLists::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_ranges" {
+                            extra_sections.debug_ranges =
+                                gimli::DebugRanges::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else if reader.name() == ".debug_rnglists" {
+                            extra_sections.debug_rnglists =
+                                gimli::DebugRngLists::new(reader.data(), gimli::LittleEndian);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    #[cfg(not(feature = "dwarf"))]
+                    {
+                        false
                     }
                 }
+                _ => false,
+            };
+
+            if !handled {
+                module
+                    .custom_sections
+                    .insert(reader.name().to_owned(), reader.data());
             }
-            KnownCustom::Unknown => {
-                // if reader.name() == ".debug_info" {
-                //     dwarf.debug_info = gimli::DebugInfo::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_abbrev" {
-                //     dwarf.debug_abbrev =
-                //         gimli::DebugAbbrev::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_addr" {
-                //     dwarf.debug_addr = gimli::DebugAddr::from(gimli::EndianSlice::new(
-                //         reader.data(),
-                //         gimli::LittleEndian,
-                //     ));
-                // } else if reader.name() == ".debug_aranges" {
-                //     dwarf.debug_aranges =
-                //         gimli::DebugAranges::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_line" {
-                //     dwarf.debug_line = gimli::DebugLine::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_line_str" {
-                //     dwarf.debug_line_str =
-                //         gimli::DebugLineStr::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_str" {
-                //     dwarf.debug_str = gimli::DebugStr::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_str_offsets" {
-                //     dwarf.debug_str_offsets = gimli::DebugStrOffsets::from(
-                //         gimli::EndianSlice::new(reader.data(), gimli::LittleEndian),
-                //     );
-                // } else if reader.name() == ".debug_types" {
-                //     dwarf.debug_types = gimli::DebugTypes::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_loc" {
-                //     extra_sections.debug_loc =
-                //         gimli::DebugLoc::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_loclists" {
-                //     extra_sections.debug_loclists =
-                //         gimli::DebugLocLists::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_ranges" {
-                //     extra_sections.debug_ranges =
-                //         gimli::DebugRanges::new(reader.data(), gimli::LittleEndian);
-                // } else if reader.name() == ".debug_rnglists" {
-                //     extra_sections.debug_rnglists =
-                //         gimli::DebugRngLists::new(reader.data(), gimli::LittleEndian);
-                // }else{
-                {
-                    module
-                        .custom_sections
-                        .insert(reader.name().to_owned(), reader.data().to_owned());
-                }
-            }
-            _ => {}
-        },
+        }
         Payload::Version { .. } => {}
         Payload::ElementSection(reader) => {
             for element in reader {
@@ -442,7 +486,7 @@ impl<'a> DebugLocReader<'a> {
             .debug_map
             .tuples
             .binary_search_by(|&(start, len, _)| {
-                use core::cmp::Ordering::*;
+                use std::cmp::Ordering::*;
                 if start > func_address {
                     Greater
                 } else if (start + len) <= func_address {
@@ -485,21 +529,11 @@ pub(crate) fn parse_body<'a>(
 
     let mut debug_locs = DebugLocReader::new(module, body.range().start as u32);
 
-    let SignatureData::Func {
-        params,
-        returns,
-        shared,
-    } = &module.signatures[my_sig]
-    else {
-        anyhow::bail!("invalid sig")
-    };
-    ret.shared = *shared;
-
-    for &param in &params[..] {
+    for &param in &module.signatures[my_sig].params[..] {
         ret.locals.push(param.into());
     }
-    ret.n_params = params.len();
-    for &r in &returns[..] {
+    ret.n_params = module.signatures[my_sig].params.len();
+    for &r in &module.signatures[my_sig].returns[..] {
         ret.rets.push(r.into());
     }
 
@@ -524,7 +558,7 @@ pub(crate) fn parse_body<'a>(
     builder.locals.seal_block_preds(entry, &mut builder.body);
     builder.locals.start_block(entry);
 
-    for (arg_idx, &arg_ty) in params.iter().enumerate() {
+    for (arg_idx, &arg_ty) in module.signatures[my_sig].params.iter().enumerate() {
         let local_idx = Local::new(arg_idx);
         builder.body.add_blockparam(entry, arg_ty);
         let value = builder.body.blocks[entry].params.last().unwrap().1;
@@ -533,7 +567,7 @@ pub(crate) fn parse_body<'a>(
         builder.locals.set(local_idx, value);
     }
 
-    let n_args = params.len();
+    let n_args = module.signatures[my_sig].params.len();
     for (offset, local_ty) in locals.values().enumerate() {
         let local_idx = Local::new(n_args + offset);
         builder.locals.declare(local_idx, *local_ty);
@@ -608,7 +642,7 @@ impl LocalTracker {
         }
         log::trace!("finish_block: block {}", self.cur_block);
         if reachable {
-            let mapping = core::mem::take(&mut self.in_cur_block);
+            let mapping = std::mem::take(&mut self.in_cur_block);
             log::trace!(" -> mapping: {:?}", mapping);
             let old_mapping = self.block_end.insert(self.cur_block, mapping);
             assert!(
@@ -958,17 +992,8 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
             locals: LocalTracker::default(),
         };
 
-        let SignatureData::Func {
-            params,
-            returns,
-            shared,
-        } = &module.signatures[my_sig]
-        else {
-            todo!()
-        };
-
         // Push initial implicit Block.
-        let results = returns.to_vec();
+        let results = module.signatures[my_sig].returns.to_vec();
         let out = ret.body.add_block();
         ret.add_block_params(out, &results[..]);
         ret.ctrl_stack.push(Frame::Block {
@@ -1075,6 +1100,73 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
             | wasmparser::Operator::I64Store8 { .. }
             | wasmparser::Operator::I64Store16 { .. }
             | wasmparser::Operator::I64Store32 { .. }
+            | wasmparser::Operator::MemoryAtomicNotify { .. }
+            | wasmparser::Operator::MemoryAtomicWait32 { .. }
+            | wasmparser::Operator::MemoryAtomicWait64 { .. }
+            | wasmparser::Operator::AtomicFence
+            | wasmparser::Operator::I32AtomicLoad { .. }
+            | wasmparser::Operator::I64AtomicLoad { .. }
+            | wasmparser::Operator::I32AtomicLoad8U { .. }
+            | wasmparser::Operator::I32AtomicLoad16U { .. }
+            | wasmparser::Operator::I64AtomicLoad8U { .. }
+            | wasmparser::Operator::I64AtomicLoad16U { .. }
+            | wasmparser::Operator::I64AtomicLoad32U { .. }
+            | wasmparser::Operator::I32AtomicStore { .. }
+            | wasmparser::Operator::I64AtomicStore { .. }
+            | wasmparser::Operator::I32AtomicStore8 { .. }
+            | wasmparser::Operator::I32AtomicStore16 { .. }
+            | wasmparser::Operator::I64AtomicStore8 { .. }
+            | wasmparser::Operator::I64AtomicStore16 { .. }
+            | wasmparser::Operator::I64AtomicStore32 { .. }
+            | wasmparser::Operator::I32AtomicRmwAdd { .. }
+            | wasmparser::Operator::I64AtomicRmwAdd { .. }
+            | wasmparser::Operator::I32AtomicRmw8AddU { .. }
+            | wasmparser::Operator::I32AtomicRmw16AddU { .. }
+            | wasmparser::Operator::I64AtomicRmw8AddU { .. }
+            | wasmparser::Operator::I64AtomicRmw16AddU { .. }
+            | wasmparser::Operator::I64AtomicRmw32AddU { .. }
+            | wasmparser::Operator::I32AtomicRmwSub { .. }
+            | wasmparser::Operator::I64AtomicRmwSub { .. }
+            | wasmparser::Operator::I32AtomicRmw8SubU { .. }
+            | wasmparser::Operator::I32AtomicRmw16SubU { .. }
+            | wasmparser::Operator::I64AtomicRmw8SubU { .. }
+            | wasmparser::Operator::I64AtomicRmw16SubU { .. }
+            | wasmparser::Operator::I64AtomicRmw32SubU { .. }
+            | wasmparser::Operator::I32AtomicRmwAnd { .. }
+            | wasmparser::Operator::I64AtomicRmwAnd { .. }
+            | wasmparser::Operator::I32AtomicRmw8AndU { .. }
+            | wasmparser::Operator::I32AtomicRmw16AndU { .. }
+            | wasmparser::Operator::I64AtomicRmw8AndU { .. }
+            | wasmparser::Operator::I64AtomicRmw16AndU { .. }
+            | wasmparser::Operator::I64AtomicRmw32AndU { .. }
+            | wasmparser::Operator::I32AtomicRmwOr { .. }
+            | wasmparser::Operator::I64AtomicRmwOr { .. }
+            | wasmparser::Operator::I32AtomicRmw8OrU { .. }
+            | wasmparser::Operator::I32AtomicRmw16OrU { .. }
+            | wasmparser::Operator::I64AtomicRmw8OrU { .. }
+            | wasmparser::Operator::I64AtomicRmw16OrU { .. }
+            | wasmparser::Operator::I64AtomicRmw32OrU { .. }
+            | wasmparser::Operator::I32AtomicRmwXor { .. }
+            | wasmparser::Operator::I64AtomicRmwXor { .. }
+            | wasmparser::Operator::I32AtomicRmw8XorU { .. }
+            | wasmparser::Operator::I32AtomicRmw16XorU { .. }
+            | wasmparser::Operator::I64AtomicRmw8XorU { .. }
+            | wasmparser::Operator::I64AtomicRmw16XorU { .. }
+            | wasmparser::Operator::I64AtomicRmw32XorU { .. }
+            | wasmparser::Operator::I32AtomicRmwXchg { .. }
+            | wasmparser::Operator::I64AtomicRmwXchg { .. }
+            | wasmparser::Operator::I32AtomicRmw8XchgU { .. }
+            | wasmparser::Operator::I32AtomicRmw16XchgU { .. }
+            | wasmparser::Operator::I64AtomicRmw8XchgU { .. }
+            | wasmparser::Operator::I64AtomicRmw16XchgU { .. }
+            | wasmparser::Operator::I64AtomicRmw32XchgU { .. }
+            | wasmparser::Operator::I32AtomicRmwCmpxchg { .. }
+            | wasmparser::Operator::I64AtomicRmwCmpxchg { .. }
+            | wasmparser::Operator::I32AtomicRmw8CmpxchgU { .. }
+            | wasmparser::Operator::I32AtomicRmw16CmpxchgU { .. }
+            | wasmparser::Operator::I64AtomicRmw8CmpxchgU { .. }
+            | wasmparser::Operator::I64AtomicRmw16CmpxchgU { .. }
+            | wasmparser::Operator::I64AtomicRmw32CmpxchgU { .. }
             | wasmparser::Operator::MemorySize { .. }
             | wasmparser::Operator::MemoryGrow { .. }
             | wasmparser::Operator::I32Const { .. }
@@ -1221,8 +1313,6 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
             | wasmparser::Operator::TableSet { .. }
             | wasmparser::Operator::TableGrow { .. }
             | wasmparser::Operator::TableSize { .. }
-            | wasmparser::Operator::MemoryCopy { .. }
-            | wasmparser::Operator::MemoryFill { .. }
             | wasmparser::Operator::V128Load { .. }
             | wasmparser::Operator::V128Load8x8S { .. }
             | wasmparser::Operator::V128Load8x8U { .. }
@@ -1461,7 +1551,10 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
             | wasmparser::Operator::F64x2PromoteLowF32x4
             | wasmparser::Operator::CallRef { .. }
             | wasmparser::Operator::RefIsNull
-            | wasmparser::Operator::RefFunc { .. } => {
+            | wasmparser::Operator::RefNull { .. }
+            | wasmparser::Operator::RefFunc { .. }
+            | wasmparser::Operator::MemoryFill { .. }
+            | wasmparser::Operator::MemoryCopy { .. } => {
                 self.emit(Operator::try_from(&op).unwrap(), loc)?
             }
 
@@ -1536,67 +1629,34 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
             }
 
             wasmparser::Operator::Return => {
-                let SignatureData::Func {
-                    params, returns, ..
-                } = &self.module.signatures[self.my_sig]
-                else {
-                    anyhow::bail!("invalid signature")
-                };
-                let retvals = self.pop_n(returns.len());
+                let retvals = self.pop_n(self.module.signatures[self.my_sig].returns.len());
                 self.emit_ret(&retvals[..]);
                 self.reachable = false;
             }
+
             wasmparser::Operator::ReturnCall { function_index } => {
-                let sig = self.module.funcs[Func::new(*function_index as usize)].sig();
-                let SignatureData::Func {
-                    params, returns, ..
-                } = &self.module.signatures[sig]
-                else {
-                    anyhow::bail!("invalid signature")
-                };
-                let retvals = self.pop_n(params.len());
-                self.emit_term(Terminator::ReturnCall {
-                    func: Func::new(*function_index as usize),
-                    args: retvals,
-                });
-                self.reachable = false;
+                let func = Func::new(*function_index as usize);
+                let n = self.module.signatures[self.module.funcs[func].sig()]
+                    .params
+                    .len();
+                let args = self.pop_n(n);
+                self.emit_term(Terminator::ReturnCall { func, args });
             }
+
             wasmparser::Operator::ReturnCallIndirect {
                 type_index,
                 table_index,
             } => {
-                let SignatureData::Func {
-                    params, returns, ..
-                } = &self.module.signatures[Signature::new(*type_index as usize)]
-                else {
-                    anyhow::bail!("invalid signature")
-                };
-                let retvals = self.pop_n(params.len());
+                let sig = Signature::new(*type_index as usize);
+                // the table index operand is on top of the stack, after the arguments
+                let args = self.pop_n(self.module.signatures[sig].params.len() + 1);
                 self.emit_term(Terminator::ReturnCallIndirect {
-                    sig: Signature::new(*type_index as usize),
+                    sig,
                     table: Table::new(*table_index as usize),
-                    args: retvals,
+                    args,
                 });
-                self.reachable = false;
             }
-            wasmparser::Operator::ReturnCallRef {
-                type_index,
-                // table_index,
-            } => {
-                let SignatureData::Func {
-                    params, returns, ..
-                } = &self.module.signatures[Signature::new(*type_index as usize)]
-                else {
-                    anyhow::bail!("invalid signature")
-                };
-                let retvals = self.pop_n(params.len());
-                self.emit_term(Terminator::ReturnCallRef {
-                    sig: Signature::new(*type_index as usize),
-                    // table: Table::new(*table_index as usize),
-                    args: retvals,
-                });
-                self.reachable = false;
-            }
+
             _ => bail!(FrontendError::UnsupportedFeature(format!(
                 "Unsupported operator: {:?}",
                 op
@@ -1632,13 +1692,8 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
                 match &frame {
                     None => {
                         if self.reachable {
-                            let SignatureData::Func {
-                                params, returns, ..
-                            } = &self.module.signatures[self.my_sig]
-                            else {
-                                anyhow::bail!("invalid signature")
-                            };
-                            let retvals = self.pop_n(returns.len());
+                            let retvals =
+                                self.pop_n(self.module.signatures[self.my_sig].returns.len());
                             self.emit_ret(&retvals[..]);
                         } else {
                             self.emit_unreachable();
@@ -1894,13 +1949,10 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
             BlockType::Type(ret_ty) => (vec![], vec![ret_ty.into()]),
             BlockType::FuncType(sig_idx) => {
                 let sig = &self.module.signatures[Signature::from(sig_idx)];
-                let SignatureData::Func {
-                    params, returns, ..
-                } = &sig
-                else {
-                    todo!()
-                };
-                (Vec::from(params.clone()), Vec::from(returns.clone()))
+                (
+                    Vec::from(sig.params.clone()),
+                    Vec::from(sig.returns.clone()),
+                )
             }
         }
     }
@@ -2021,15 +2073,9 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
         }
     }
 
-    fn emit_term(&mut self, t: Terminator) {
-        log::trace!(
-            "emit_term: cur_block {} reachable {} terminator {:?}",
-            self.cur_block,
-            self.reachable,
-            t
-        );
+    fn emit_term(&mut self, terminator: Terminator) {
         if self.reachable {
-            self.body.set_terminator(self.cur_block, t);
+            self.body.set_terminator(self.cur_block, terminator);
             self.reachable = false;
         }
     }
@@ -2061,8 +2107,8 @@ impl<'a, 'b> FunctionBodyBuilder<'a, 'b> {
     }
 
     fn emit(&mut self, op: Operator, loc: SourceLoc) -> Result<()> {
-        let inputs = op_inputs(self.module, Some(&self.op_stack[..]), &op)?;
-        let outputs = op_outputs(self.module, Some(&self.op_stack[..]), &op)?;
+        let inputs = op_inputs(self.module, &self.op_stack[..], &op)?;
+        let outputs = op_outputs(self.module, &self.op_stack[..], &op)?;
 
         log::trace!(
             "emit into block {:?}: op {:?} inputs {:?}",

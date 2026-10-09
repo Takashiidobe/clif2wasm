@@ -11,12 +11,11 @@
 
 use crate::cfg::CFGInfo;
 use crate::entity::EntityRef;
-use crate::ir::{Block, BlockTarget, FunctionBody, Terminator, Type, Value};
-use crate::{Func, Signature, Table};
-use alloc::vec;
-use alloc::vec::Vec;
-use core::convert::TryFrom;
-use hashbrown::HashSet;
+use crate::ir::{
+    Block, BlockTarget, Func, FunctionBody, Signature, Table, Terminator, Type, Value,
+};
+use fxhash::FxHashSet as HashSet;
+use std::convert::TryFrom;
 
 #[derive(Clone, Debug)]
 pub enum WasmBlock<'a> {
@@ -52,22 +51,15 @@ pub enum WasmBlock<'a> {
     BlockParams {
         from: &'a [Value],
         to: &'a [(Type, Value)],
-        prefix: usize,
     },
     /// A function return instruction.
     Return { values: &'a [Value] },
-    /// A function tail call instruction
+    /// A function tail call instruction.
     ReturnCall { func: Func, values: &'a [Value] },
-    /// A function indirect tail call instruction
+    /// An indirect tail call instruction; the table index is the last value.
     ReturnCallIndirect {
         sig: Signature,
         table: Table,
-        values: &'a [Value],
-    },
-    /// A function refernce tail call instruction
-    ReturnCallRef {
-        sig: Signature,
-        // table: Table,
         values: &'a [Value],
     },
     /// An unreachable instruction.
@@ -157,11 +149,7 @@ enum StackEntry<'a> {
     FinishBlock(Block),
     Else,
     FinishIf(Value),
-    DoBranch {
-        block: Block,
-        target: &'a BlockTarget,
-        prefix: usize,
-    },
+    DoBranch(Block, &'a BlockTarget),
 }
 
 impl<'a, 'b> Context<'a, 'b> {
@@ -183,9 +171,9 @@ impl<'a, 'b> Context<'a, 'b> {
         body: &FunctionBody,
         cfg: &CFGInfo,
     ) -> anyhow::Result<(HashSet<Block>, HashSet<Block>)> {
-        let mut loop_headers = HashSet::new();
-        let mut branched_once = HashSet::new();
-        let mut merge_nodes = HashSet::new();
+        let mut loop_headers = HashSet::default();
+        let mut branched_once = HashSet::default();
+        let mut merge_nodes = HashSet::default();
 
         for (block_rpo, &block) in cfg.rpo.entries() {
             for &succ in &body.blocks[block].succs {
@@ -272,12 +260,8 @@ impl<'a, 'b> Context<'a, 'b> {
             StackEntry::FinishIf(cond) => {
                 self.finish_if(cond);
             }
-            StackEntry::DoBranch {
-                block,
-                target,
-                prefix,
-            } => {
-                self.do_branch(block, target, prefix);
+            StackEntry::DoBranch(source, target) => {
+                self.do_branch(source, target);
             }
         }
     }
@@ -286,11 +270,11 @@ impl<'a, 'b> Context<'a, 'b> {
         let mut merge_node_children = self
             .cfg
             .dom_children(block)
-            .filter(|child| self.merge_nodes.contains(child))
+            .filter(|child| self.merge_nodes.contains(&child))
             .collect::<Vec<_>>();
         // Sort merge nodes so highest RPO number comes first.
         merge_node_children
-            .sort_unstable_by_key(|&block| core::cmp::Reverse(self.cfg.rpo_pos[block]));
+            .sort_unstable_by_key(|&block| std::cmp::Reverse(self.cfg.rpo_pos[block]));
 
         let is_loop_header = self.loop_headers.contains(&block);
 
@@ -346,7 +330,7 @@ impl<'a, 'b> Context<'a, 'b> {
         )
     }
 
-    fn do_branch(&mut self, source: Block, target: &'a BlockTarget, prefix: usize) {
+    fn do_branch(&mut self, source: Block, target: &'a BlockTarget) {
         let into = self.result.last_mut().unwrap();
         log::trace!("do_branch: {} -> {:?}", source, target);
         // This will be a branch to some entry in the control stack if
@@ -360,7 +344,6 @@ impl<'a, 'b> Context<'a, 'b> {
                 &target.args[..],
                 &self.body.blocks[target.block].params[..],
                 into,
-                prefix,
             );
             into.push(WasmBlock::Br { target: index });
         } else {
@@ -370,7 +353,6 @@ impl<'a, 'b> Context<'a, 'b> {
                 &target.args[..],
                 &self.body.blocks[target.block].params[..],
                 into,
-                prefix,
             );
             self.process_stack
                 .push(StackEntry::DomSubtree(target.block));
@@ -394,7 +376,7 @@ impl<'a, 'b> Context<'a, 'b> {
         }];
 
         let mut extra = targets.len() + 1;
-        for target in targets.iter().chain(core::iter::once(default)) {
+        for target in targets.iter().chain(std::iter::once(default)) {
             extra -= 1;
             let outer_body = vec![
                 WasmBlock::Block {
@@ -404,7 +386,6 @@ impl<'a, 'b> Context<'a, 'b> {
                 WasmBlock::BlockParams {
                     from: &target.args[..],
                     to: &self.body.blocks[target.block].params[..],
-                    prefix: 0,
                 },
                 WasmBlock::Br {
                     target: Self::resolve_target(&self.ctrl_stack[..], target.block).add(extra),
@@ -420,9 +401,8 @@ impl<'a, 'b> Context<'a, 'b> {
         from: &'a [Value],
         to: &'a [(Type, Value)],
         into: &mut Vec<WasmBlock<'a>>,
-        prefix: usize,
     ) {
-        into.push(WasmBlock::BlockParams { from, to, prefix });
+        into.push(WasmBlock::BlockParams { from, to });
     }
 
     fn finish_block(&mut self, out: Block) {
@@ -469,11 +449,7 @@ impl<'a, 'b> Context<'a, 'b> {
             into.push(WasmBlock::Leaf { block });
             match &self.body.blocks[block].terminator {
                 &Terminator::Br { ref target } => {
-                    self.process_stack.push(StackEntry::DoBranch {
-                        block,
-                        target,
-                        prefix: 0,
-                    });
+                    self.process_stack.push(StackEntry::DoBranch(block, target));
                 }
                 &Terminator::CondBr {
                     cond,
@@ -482,17 +458,11 @@ impl<'a, 'b> Context<'a, 'b> {
                 } => {
                     self.ctrl_stack.push(CtrlEntry::IfThenElse);
                     self.process_stack.push(StackEntry::FinishIf(cond));
-                    self.process_stack.push(StackEntry::DoBranch {
-                        block: block,
-                        target: if_false,
-                        prefix: 0,
-                    });
+                    self.process_stack
+                        .push(StackEntry::DoBranch(block, if_false));
                     self.process_stack.push(StackEntry::Else);
-                    self.process_stack.push(StackEntry::DoBranch {
-                        block: block,
-                        target: if_true,
-                        prefix: 0,
-                    });
+                    self.process_stack
+                        .push(StackEntry::DoBranch(block, if_true));
                     self.result.push(vec![]); // if-body
                 }
                 &Terminator::Select {
@@ -505,14 +475,8 @@ impl<'a, 'b> Context<'a, 'b> {
                 &Terminator::Return { ref values } => {
                     into.push(WasmBlock::Return { values });
                 }
-                &Terminator::Unreachable | &Terminator::None | &Terminator::UB => {
-                    into.push(WasmBlock::Unreachable);
-                }
                 &Terminator::ReturnCall { func, ref args } => {
-                    into.push(WasmBlock::ReturnCall {
-                        func: func,
-                        values: args,
-                    });
+                    into.push(WasmBlock::ReturnCall { func, values: args });
                 }
                 &Terminator::ReturnCallIndirect {
                     sig,
@@ -523,15 +487,9 @@ impl<'a, 'b> Context<'a, 'b> {
                     table,
                     values: args,
                 }),
-                &Terminator::ReturnCallRef {
-                    sig,
-                    // table,
-                    ref args,
-                } => into.push(WasmBlock::ReturnCallRef {
-                    sig,
-                    // table,
-                    values: args,
-                }),
+                &Terminator::Unreachable | &Terminator::None => {
+                    into.push(WasmBlock::Unreachable);
+                }
             }
         }
     }

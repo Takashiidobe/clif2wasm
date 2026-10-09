@@ -5,13 +5,7 @@ use crate::ir::*;
 use crate::ops::Operator;
 use smallvec::{smallvec, SmallVec};
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-use hashbrown::HashMap;
-
-// mod wasi;
+use fxhash::FxHashMap as HashMap;
 
 /// How large do we allow a Wasm memory to be when interpreting? Limit
 /// the size somewhat (apply an implementation limit) so we do not
@@ -29,9 +23,6 @@ pub struct InterpContext {
     pub globals: PerEntity<Global, ConstVal>,
     /// Fuel remaining: allows deterministic stopping of execution.
     pub fuel: u64,
-    pub trace_handler: Option<Box<dyn Fn(usize, Vec<ConstVal>) -> bool + Send>>,
-    pub import_hander:
-        Arc<dyn Fn(&mut InterpContext, &mut Module<'_>, &str, &[ConstVal]) -> InterpResult>,
 }
 
 /// The state of one interpreter memory.
@@ -67,7 +58,7 @@ pub enum InterpResult {
 }
 
 /// A constant concrete value during interpretation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ConstVal {
     I32(u32),
     I64(u64),
@@ -75,7 +66,6 @@ pub enum ConstVal {
     F64(u64),
     #[default]
     None,
-    Ref(Option<Func>),
 }
 
 /// Representation of multiple result values.
@@ -138,302 +128,185 @@ impl InterpContext {
             tables,
             globals,
             fuel: u64::MAX,
-            trace_handler: None,
-            import_hander: Arc::new(|_, _, _, _| todo!()),
         })
     }
 
     /// Call the given function with the given args, running the
     /// interpreter until fuel is exhausted or the function returns.
-    pub fn call(&mut self, module: &Module<'_>, mut func: Func, args: &[ConstVal]) -> InterpResult {
-        let mut args = args.to_vec();
-        'redo: loop {
-            let body = match &module.funcs[func] {
-                FuncDecl::Lazy(..) => panic!("Un-expanded function"),
-                FuncDecl::Compiled(..) => panic!("Already-compiled function"),
-                FuncDecl::Import(..) => {
-                    let import = &module.imports[func.index()];
-                    assert_eq!(import.kind, ImportKind::Func(func));
-                    // return self.call_import(module,&import.name[..], args);
-                    todo!()
-                }
-                FuncDecl::Body(_, _, body) => body,
-                FuncDecl::None => panic!("FuncDecl::None in call()"),
-            };
+    pub fn call(&mut self, module: &Module<'_>, func: Func, args: &[ConstVal]) -> InterpResult {
+        let body = match &module.funcs[func] {
+            FuncDecl::Lazy(..) => panic!("Un-expanded function"),
+            FuncDecl::Compiled(..) => panic!("Already-compiled function"),
+            FuncDecl::Import(..) => {
+                let import = &module.imports[func.index()];
+                assert_eq!(import.kind, ImportKind::Func(func));
+                return self.call_import(&import.name[..], args);
+            }
+            FuncDecl::Body(_, _, body) => body,
+            FuncDecl::None => panic!("FuncDecl::None in call()"),
+        };
 
-            log::trace!(
-                "Interp: entering func {}:\n{}\n",
-                func,
-                body.display_verbose("| ", Some(module))
-            );
-            log::trace!("args: {:?}", args);
+        log::trace!(
+            "Interp: entering func {}:\n{}\n",
+            func,
+            body.display_verbose("| ", Some(module))
+        );
+        log::trace!("args: {:?}", args);
 
-            let mut frame = InterpStackFrame {
-                func,
-                cur_block: body.entry,
-                values: HashMap::new(),
-            };
+        let mut frame = InterpStackFrame {
+            func,
+            cur_block: body.entry,
+            values: HashMap::default(),
+        };
 
-            for (&arg, &(_, blockparam)) in args.iter().zip(body.blocks[body.entry].params.iter()) {
-                log::trace!("Entry block param {} gets arg value {:?}", blockparam, arg);
-                frame.values.insert(blockparam, smallvec![arg]);
+        for (&arg, &(_, blockparam)) in args.iter().zip(body.blocks[body.entry].params.iter()) {
+            log::trace!("Entry block param {} gets arg value {:?}", blockparam, arg);
+            frame.values.insert(blockparam, smallvec![arg]);
+        }
+
+        loop {
+            self.fuel -= 1;
+            if self.fuel == 0 {
+                return InterpResult::OutOfFuel;
             }
 
-            loop {
-                self.fuel -= 1;
-                if self.fuel == 0 {
-                    return InterpResult::OutOfFuel;
-                }
-
-                loop {
-                    self.fuel -= 1;
-                    if self.fuel == 0 {
-                        return InterpResult::OutOfFuel;
+            log::trace!("Interpreting block {}", frame.cur_block);
+            for (inst_idx, &inst) in body.blocks[frame.cur_block].insts.iter().enumerate() {
+                log::trace!("Evaluating inst {}", inst);
+                let result = match &body.values[inst] {
+                    &ValueDef::Alias(_) => smallvec![],
+                    &ValueDef::PickOutput(val, idx, _) => {
+                        let val = body.resolve_alias(val);
+                        smallvec![frame.values.get(&val).unwrap()[idx as usize]]
                     }
-
-                    log::trace!("Interpreting block {}", frame.cur_block);
-                    for (inst_idx, &inst) in body.blocks[frame.cur_block]
-                        .insts
-                        .iter()
-                        .map(|a| &a.value)
-                        .enumerate()
-                    {
-                        log::trace!("Evaluating inst {}", inst);
-                        let result = match &body.values[inst] {
-                            &ValueDef::Alias(_) => smallvec![],
-                            &ValueDef::PickOutput(val, idx, _) => {
-                                let val = body.resolve_alias(val);
-                                smallvec![frame.values.get(&val).unwrap()[idx as usize]]
-                            }
-                            &ValueDef::Operator(Operator::Call { function_index }, args, _) => {
-                                let args = body.arg_pool[args]
-                                    .iter()
-                                    .map(|&arg| {
-                                        let arg = body.resolve_alias(arg);
-                                        let multivalue = frame.values.get(&arg).unwrap();
-                                        assert_eq!(multivalue.len(), 1);
-                                        multivalue[0]
-                                    })
-                                    .collect::<Vec<_>>();
-                                let result = self.call(module, function_index, &args[..]);
-                                match result {
-                                    InterpResult::Ok(vals) => vals,
-                                    _ => return result,
-                                }
-                            }
-                            &ValueDef::Operator(
-                                Operator::CallIndirect { table_index, .. },
-                                args,
-                                _,
-                            ) => {
-                                let args = body.arg_pool[args]
-                                    .iter()
-                                    .map(|&arg| {
-                                        let arg = body.resolve_alias(arg);
-                                        let multivalue = frame.values.get(&arg).unwrap();
-                                        assert_eq!(multivalue.len(), 1);
-                                        multivalue[0]
-                                    })
-                                    .collect::<Vec<_>>();
-                                let idx = args.last().unwrap().as_u32().unwrap() as usize;
-                                let func = self.tables[table_index].elements[idx];
-                                let result = self.call(module, func, &args[..args.len() - 1]);
-                                match result {
-                                    InterpResult::Ok(vals) => vals,
-                                    _ => return result,
-                                }
-                            }
-                            &ValueDef::Operator(Operator::CallRef { .. }, args, _) => {
-                                let args = body.arg_pool[args]
-                                    .iter()
-                                    .map(|&arg| {
-                                        let arg = body.resolve_alias(arg);
-                                        let multivalue = frame.values.get(&arg).unwrap();
-                                        assert_eq!(multivalue.len(), 1);
-                                        multivalue[0]
-                                    })
-                                    .collect::<Vec<_>>();
-                                let ConstVal::Ref(idx) = args.last().unwrap() else {
-                                    todo!()
-                                };
-                                let func = idx.unwrap();
-                                let result = self.call(module, func, &args[..args.len() - 1]);
-                                match result {
-                                    InterpResult::Ok(vals) => vals,
-                                    _ => return result,
-                                }
-                            }
-                            &ValueDef::Operator(ref op, args, _) => {
-                                let args = body.arg_pool[args]
-                                    .iter()
-                                    .map(|&arg| {
-                                        let arg = body.resolve_alias(arg);
-                                        let multivalue = frame
-                                            .values
-                                            .get(&arg)
-                                            .ok_or_else(|| format!("Unset SSA value: {}", arg))
-                                            .unwrap();
-                                        assert_eq!(multivalue.len(), 1);
-                                        multivalue[0]
-                                    })
-                                    .collect::<Vec<_>>();
-                                let result = match const_eval(op, &args[..], Some(self)) {
-                                    Some(result) => result,
-                                    None => {
-                                        log::trace!(
-                                            "const_eval failed on {:?} args {:?}",
-                                            op,
-                                            args
-                                        );
-                                        return InterpResult::Trap(
-                                            frame.func,
-                                            frame.cur_block,
-                                            inst_idx as u32,
-                                        );
-                                    }
-                                };
-                                smallvec![result]
-                            }
-                            &ValueDef::None
-                            | &ValueDef::Placeholder(..)
-                            | &ValueDef::BlockParam(..) => {
-                                unreachable!();
+                    &ValueDef::Operator(Operator::Call { function_index }, args, _) => {
+                        let args = body.arg_pool[args]
+                            .iter()
+                            .map(|&arg| {
+                                let arg = body.resolve_alias(arg);
+                                let multivalue = frame.values.get(&arg).unwrap();
+                                assert_eq!(multivalue.len(), 1);
+                                multivalue[0]
+                            })
+                            .collect::<Vec<_>>();
+                        let result = self.call(module, function_index, &args[..]);
+                        match result {
+                            InterpResult::Ok(vals) => vals,
+                            _ => return result,
+                        }
+                    }
+                    &ValueDef::Operator(Operator::CallIndirect { table_index, .. }, args, _) => {
+                        let args = body.arg_pool[args]
+                            .iter()
+                            .map(|&arg| {
+                                let arg = body.resolve_alias(arg);
+                                let multivalue = frame.values.get(&arg).unwrap();
+                                assert_eq!(multivalue.len(), 1);
+                                multivalue[0]
+                            })
+                            .collect::<Vec<_>>();
+                        let idx = args.last().unwrap().as_u32().unwrap() as usize;
+                        let func = self.tables[table_index].elements[idx];
+                        let result = self.call(module, func, &args[..args.len() - 1]);
+                        match result {
+                            InterpResult::Ok(vals) => vals,
+                            _ => return result,
+                        }
+                    }
+                    &ValueDef::Operator(ref op, args, _) => {
+                        let args = body.arg_pool[args]
+                            .iter()
+                            .map(|&arg| {
+                                let arg = body.resolve_alias(arg);
+                                let multivalue = frame
+                                    .values
+                                    .get(&arg)
+                                    .ok_or_else(|| format!("Unset SSA value: {}", arg))
+                                    .unwrap();
+                                assert_eq!(multivalue.len(), 1);
+                                multivalue[0]
+                            })
+                            .collect::<Vec<_>>();
+                        let result = match const_eval(op, &args[..], Some(self)) {
+                            Some(result) => result,
+                            None => {
+                                log::trace!("const_eval failed on {:?} args {:?}", op, args);
+                                return InterpResult::Trap(
+                                    frame.func,
+                                    frame.cur_block,
+                                    inst_idx as u32,
+                                );
                             }
                         };
-
-                        log::trace!("Inst {} gets result {:?}", inst, result);
-                        frame.values.insert(inst, result);
+                        smallvec![result]
                     }
+                    &ValueDef::None | &ValueDef::Placeholder(..) | &ValueDef::BlockParam(..) => {
+                        unreachable!();
+                    }
+                };
 
-                    match &body.blocks[frame.cur_block].terminator {
-                        crate::Terminator::UB => {
-                            return InterpResult::OutOfFuel;
-                        }
-                        &Terminator::ReturnCallIndirect {
-                            sig,
-                            table,
-                            args: ref args2,
-                        } => {
-                            let args2 = args2
-                                .iter()
-                                .map(|&arg| {
-                                    let arg = body.resolve_alias(arg);
-                                    let multivalue = frame.values.get(&arg).unwrap();
-                                    assert_eq!(multivalue.len(), 1);
-                                    multivalue[0]
-                                })
-                                .collect::<Vec<_>>();
-                            let idx = args2.last().unwrap().as_u32().unwrap() as usize;
-                            let fu = self.tables[table].elements[idx];
-                            func = fu;
-                            args = args2[..args2.len() - 1].to_vec();
-                            continue 'redo;
-                            // let result = self.call(module, func, &args[..args.len() - 1]);
-                            // return result;
-                        }
-                        &Terminator::ReturnCall {
-                            func: fu,
-                            args: ref args2,
-                        } => {
-                            let args2 = args2
-                                .iter()
-                                .map(|&arg| {
-                                    let arg = body.resolve_alias(arg);
-                                    let multivalue = frame.values.get(&arg).unwrap();
-                                    assert_eq!(multivalue.len(), 1);
-                                    multivalue[0]
-                                })
-                                .collect::<Vec<_>>();
-                            func = fu;
-                            args = args2;
-                            continue 'redo;
-                        }
-                        &Terminator::None => {
-                            return InterpResult::Trap(frame.func, frame.cur_block, u32::MAX)
-                        }
-                        &Terminator::Unreachable => {
-                            return InterpResult::Trap(frame.func, frame.cur_block, u32::MAX)
-                        }
-                        &Terminator::Br { ref target } => {
-                            frame.apply_target(&body, target);
-                        }
-                        &Terminator::CondBr {
-                            cond,
-                            ref if_true,
-                            ref if_false,
-                        } => {
-                            let cond = body.resolve_alias(cond);
-                            let cond = frame.values.get(&cond).unwrap();
-                            let cond = cond[0].as_u32().unwrap() != 0;
-                            if cond {
-                                frame.apply_target(&body, if_true);
-                            } else {
-                                frame.apply_target(&body, if_false);
-                            }
-                        }
-                        &Terminator::Select {
-                            value,
-                            ref targets,
-                            ref default,
-                        } => {
-                            let value = body.resolve_alias(value);
-                            let value = frame.values.get(&value).unwrap();
-                            let value = value[0].as_u32().unwrap() as usize;
-                            if value < targets.len() {
-                                frame.apply_target(&body, &targets[value]);
-                            } else {
-                                frame.apply_target(&body, default);
-                            }
-                        }
-                        &Terminator::Return { ref values } => {
-                            let values = values
-                                .iter()
-                                .map(|&value| {
-                                    let value = body.resolve_alias(value);
-                                    frame.values.get(&value).unwrap()[0]
-                                })
-                                .collect();
-                            log::trace!("returning from {}: {:?}", func, values);
-                            return InterpResult::Ok(values);
-                        }
-                        Terminator::ReturnCallRef {
-                            sig,
-                            args: ref args2,
-                        } => {
-                            let args2 = args2
-                                .iter()
-                                .map(|&arg| {
-                                    let arg = body.resolve_alias(arg);
-                                    let multivalue = frame.values.get(&arg).unwrap();
-                                    assert_eq!(multivalue.len(), 1);
-                                    multivalue[0]
-                                })
-                                .collect::<Vec<_>>();
-                            let ConstVal::Ref(Some(fu)) = args.last().unwrap() else {
-                                // return InterpResult::TraceHandlerQuit;
-                                todo!()
-                            };
-                            func = *fu;
-                            args = args2[..args2.len() - 1].to_vec();
-                            continue 'redo;
-                        }
+                log::trace!("Inst {} gets result {:?}", inst, result);
+                frame.values.insert(inst, result);
+            }
+
+            match &body.blocks[frame.cur_block].terminator {
+                &Terminator::None => {
+                    return InterpResult::Trap(frame.func, frame.cur_block, u32::MAX)
+                }
+                &Terminator::Unreachable => {
+                    return InterpResult::Trap(frame.func, frame.cur_block, u32::MAX)
+                }
+                &Terminator::Br { ref target } => {
+                    frame.apply_target(body, target);
+                }
+                &Terminator::CondBr {
+                    cond,
+                    ref if_true,
+                    ref if_false,
+                } => {
+                    let cond = body.resolve_alias(cond);
+                    let cond = frame.values.get(&cond).unwrap();
+                    let cond = cond[0].as_u32().unwrap() != 0;
+                    if cond {
+                        frame.apply_target(body, if_true);
+                    } else {
+                        frame.apply_target(body, if_false);
                     }
                 }
+                &Terminator::Select {
+                    value,
+                    ref targets,
+                    ref default,
+                } => {
+                    let value = body.resolve_alias(value);
+                    let value = frame.values.get(&value).unwrap();
+                    let value = value[0].as_u32().unwrap() as usize;
+                    if value < targets.len() {
+                        frame.apply_target(body, &targets[value]);
+                    } else {
+                        frame.apply_target(body, default);
+                    }
+                }
+                &Terminator::ReturnCall { .. } | &Terminator::ReturnCallIndirect { .. } => {
+                    unimplemented!("the interpreter does not support tail calls")
+                }
+                &Terminator::Return { ref values } => {
+                    let values = values
+                        .iter()
+                        .map(|&value| {
+                            let value = body.resolve_alias(value);
+                            frame.values.get(&value).unwrap()[0]
+                        })
+                        .collect();
+                    log::trace!("returning from {}: {:?}", func, values);
+                    return InterpResult::Ok(values);
+                }
             }
-            // break 'redo;
         }
     }
 
-    fn call_import(
-        &mut self,
-        module: &mut Module<'_>,
-        name: &str,
-        args: &[ConstVal],
-    ) -> InterpResult {
-        let mut r = self.import_hander.clone();
-        let rs = r(self, module, name, args);
-        // self.import_hander = Some(r);
-        return rs;
+    fn call_import(&mut self, name: &str, args: &[ConstVal]) -> InterpResult {
+        panic!("Unknown import: {} with args: {:?}", name, args);
     }
 }
 
@@ -1032,32 +905,9 @@ pub fn const_eval(
             ConstVal::None
         }),
 
-        (Operator::TableGet { table_index }, [ConstVal::I32(i)]) => ctx.and_then(|global| {
-            Some(ConstVal::Ref(
-                global.tables[*table_index]
-                    .elements
-                    .get(*i as usize)
-                    .and_then(|x| {
-                        if *x == Func::invalid() {
-                            None
-                        } else {
-                            Some(*x)
-                        }
-                    }),
-            ))
-        }),
-        (Operator::TableSet { table_index }, [ConstVal::I32(i), ConstVal::Ref(r)]) => {
-            ctx.and_then(|global| {
-                global.tables[*table_index].elements[*i as usize] = r.unwrap_or_default();
-                Some(ConstVal::I32(0))
-            })
-        }
-        (Operator::TableGrow { table_index }, [ConstVal::I32(i)]) => ctx.and_then(|global| {
-            global.tables[*table_index]
-                .elements
-                .extend((0..*i).map(|a| Func::default()));
-            Some(ConstVal::I32(0))
-        }),
+        (Operator::TableGet { .. }, _)
+        | (Operator::TableSet { .. }, _)
+        | (Operator::TableGrow { .. }, _) => None,
 
         (Operator::TableSize { table_index }, []) => {
             ctx.map(|global| ConstVal::I32(global.tables[*table_index].elements.len() as u32))
@@ -1082,7 +932,7 @@ pub fn const_eval(
         (Operator::Unreachable, []) => None,
 
         (Operator::I32Load { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1092,7 +942,7 @@ pub fn const_eval(
             )))
         }),
         (Operator::I64Load { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(8)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1102,7 +952,7 @@ pub fn const_eval(
             )))
         }),
         (Operator::F32Load { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1112,7 +962,7 @@ pub fn const_eval(
             )))
         }),
         (Operator::F64Load { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(8)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1122,7 +972,7 @@ pub fn const_eval(
             )))
         }),
         (Operator::I32Load8S { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(1)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1131,7 +981,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I32Load8U { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1140,7 +990,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I32Load16S { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(2)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1149,7 +999,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I32Load16U { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(2)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1158,7 +1008,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I64Load8S { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(1)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1167,7 +1017,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I64Load8U { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(1)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1176,7 +1026,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I64Load16S { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(2)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1185,7 +1035,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I64Load16U { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(2)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1194,7 +1044,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I64Load32S { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1203,7 +1053,7 @@ pub fn const_eval(
             ))
         }),
         (Operator::I64Load32U { memory }, [ConstVal::I32(addr)]) => ctx.and_then(|global| {
-            let addr = addr.checked_add(memory.offset as u32)?;
+            let addr = addr.checked_add(memory.offset)?;
             if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                 return None;
             }
@@ -1213,7 +1063,7 @@ pub fn const_eval(
         }),
         (Operator::I32Store { memory }, [ConstVal::I32(addr), ConstVal::I32(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1222,7 +1072,7 @@ pub fn const_eval(
             }),
         (Operator::I64Store { memory }, [ConstVal::I32(addr), ConstVal::I64(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(8)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1231,7 +1081,7 @@ pub fn const_eval(
             }),
         (Operator::I32Store8 { memory }, [ConstVal::I32(addr), ConstVal::I32(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(1)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1240,7 +1090,7 @@ pub fn const_eval(
             }),
         (Operator::I32Store16 { memory }, [ConstVal::I32(addr), ConstVal::I32(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(2)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1249,7 +1099,7 @@ pub fn const_eval(
             }),
         (Operator::I64Store8 { memory }, [ConstVal::I32(addr), ConstVal::I64(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(1)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1258,7 +1108,7 @@ pub fn const_eval(
             }),
         (Operator::I64Store16 { memory }, [ConstVal::I32(addr), ConstVal::I64(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(2)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1267,7 +1117,7 @@ pub fn const_eval(
             }),
         (Operator::I64Store32 { memory }, [ConstVal::I32(addr), ConstVal::I64(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1276,7 +1126,7 @@ pub fn const_eval(
             }),
         (Operator::F32Store { memory }, [ConstVal::I32(addr), ConstVal::F32(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(4)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
@@ -1285,18 +1135,13 @@ pub fn const_eval(
             }),
         (Operator::F64Store { memory }, [ConstVal::I32(addr), ConstVal::F64(data)]) => ctx
             .and_then(|global| {
-                let addr = addr.checked_add(memory.offset as u32)?;
+                let addr = addr.checked_add(memory.offset)?;
                 if addr.checked_add(8)? > global.memories[memory.memory].data.len() as u32 {
                     return None;
                 }
                 write_u64(&mut global.memories[memory.memory], addr, *data);
                 Some(ConstVal::None)
             }),
-        (Operator::RefFunc { func_index }, []) => Some(ConstVal::Ref(Some(*func_index))),
-        (Operator::RefNull { ty: Type::Heap(_) }, []) => Some(ConstVal::Ref(None)),
-        (Operator::RefIsNull, [ConstVal::Ref(r)]) => {
-            Some(ConstVal::I32(if r.is_none() { 1 } else { 0 }))
-        }
         (_, args) if args.iter().any(|&arg| arg == ConstVal::None) => None,
         _ => None,
     }
@@ -1308,19 +1153,19 @@ pub(crate) fn read_u8(mem: &InterpMemory, addr: u32) -> u8 {
 }
 
 pub(crate) fn read_u16(mem: &InterpMemory, addr: u32) -> u16 {
-    use core::convert::TryInto;
+    use std::convert::TryInto;
     let addr = addr as usize;
     u16::from_le_bytes(mem.data[addr..(addr + 2)].try_into().unwrap())
 }
 
 pub(crate) fn read_u32(mem: &InterpMemory, addr: u32) -> u32 {
-    use core::convert::TryInto;
+    use std::convert::TryInto;
     let addr = addr as usize;
     u32::from_le_bytes(mem.data[addr..(addr + 4)].try_into().unwrap())
 }
 
 pub(crate) fn read_u64(mem: &InterpMemory, addr: u32) -> u64 {
-    use core::convert::TryInto;
+    use std::convert::TryInto;
     let addr = addr as usize;
     u64::from_le_bytes(mem.data[addr..(addr + 8)].try_into().unwrap())
 }

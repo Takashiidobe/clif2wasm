@@ -7,11 +7,8 @@
 use crate::cfg::CFGInfo;
 use crate::entity::PerEntity;
 use crate::ir::{Block, FunctionBody, Value, ValueDef};
-use alloc::borrow::ToOwned;
-use alloc::collections::BTreeSet;
-use alloc::vec;
-use alloc::vec::Vec;
-use hashbrown::{HashMap, HashSet};
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeSet;
 
 pub(crate) fn run(body: &mut FunctionBody, cut_blocks: Option<HashSet<Block>>, cfg: &CFGInfo) {
     MaxSSAPass::new(cut_blocks).run(body, cfg);
@@ -34,7 +31,7 @@ impl MaxSSAPass {
         Self {
             cut_blocks,
             new_args: PerEntity::default(),
-            value_map: HashMap::new(),
+            value_map: HashMap::default(),
         }
     }
 
@@ -50,8 +47,7 @@ impl MaxSSAPass {
         // uses first to deduplicate and allow more efficient
         // processing (and to appease the borrow checker).
         let mut uses = BTreeSet::default();
-        for inst in &body.blocks[block].insts {
-            let inst = inst.value;
+        for &inst in &body.blocks[block].insts {
             match &body.values[inst] {
                 &ValueDef::Operator(_, args, _) => {
                     for &arg in &body.arg_pool[args] {
@@ -77,42 +73,68 @@ impl MaxSSAPass {
     }
 
     fn visit_use(&mut self, body: &mut FunctionBody, cfg: &CFGInfo, block: Block, value: Value) {
-        if self.value_map.contains_key(&(block, value)) {
-            return;
-        }
-        if cfg.def_block[value] == block {
-            return;
-        }
-        self.new_args[block].push(value);
-
-        // Create a placeholder value.
-        let ty = body.values[value].ty(&body.type_pool).unwrap();
-        let blockparam = body.add_blockparam(block, ty);
-        self.value_map.insert((block, value), blockparam);
-
-        // Recursively visit preds and use the value there, to ensure
-        // they have the value available as well.
-        for i in 0..body.blocks[block].preds.len() {
-            // Don't borrow for whole loop while iterating (`body` is
-            // taken as mut by recursion, but we don't add preds).
-            let pred = body.blocks[block].preds[i];
-            self.visit_use(body, cfg, pred, value);
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Phase {
+            Pre,
+            Post,
         }
 
-        // If all preds have the same value, and this is not a
-        // cut-block, rewrite the blockparam to an alias instead.
-        if !self.is_cut_block(block) {
-            if let Some(pred_value) = iter_all_same(
-                body.blocks[block]
-                    .preds
-                    .iter()
-                    .map(|&pred| *self.value_map.get(&(pred, value)).unwrap_or(&value))
-                    .filter(|&val| val != blockparam),
-            ) {
-                body.blocks[block].params.pop();
-                self.new_args[block].pop();
-                body.values[blockparam] = ValueDef::Alias(pred_value);
-                self.value_map.insert((block, value), pred_value);
+        let mut stack = vec![(block, value, Phase::Pre, None)];
+
+        while let Some(&(block, value, phase, _)) = stack.last() {
+            match phase {
+                Phase::Pre => {
+                    if self.value_map.contains_key(&(block, value)) {
+                        stack.pop();
+                        continue;
+                    }
+                    if cfg.def_block[value] == block {
+                        stack.pop();
+                        continue;
+                    }
+
+                    self.new_args[block].push(value);
+
+                    // Create a placeholder value.
+                    let ty = body.values[value].ty(&body.type_pool).unwrap();
+                    let blockparam = body.add_blockparam(block, ty);
+                    self.value_map.insert((block, value), blockparam);
+
+                    stack.pop();
+                    stack.push((block, value, Phase::Post, Some(blockparam)));
+
+                    // Recursively visit preds and use the value there, to
+                    // ensure they have the value available as well.
+                    for i in 0..body.blocks[block].preds.len() {
+                        // Don't borrow for whole loop while iterating (`body` is
+                        // taken as mut by recursion, but we don't add preds).
+                        let pred = body.blocks[block].preds[i];
+                        stack.push((pred, value, Phase::Pre, None));
+                    }
+                }
+
+                Phase::Post => {
+                    let Some((_, _, _, Some(blockparam))) = stack.pop() else {
+                        unreachable!()
+                    };
+
+                    // If all preds have the same value, and this is not a
+                    // cut-block, rewrite the blockparam to an alias instead.
+                    if !self.is_cut_block(block) {
+                        if let Some(pred_value) = iter_all_same(
+                            body.blocks[block]
+                                .preds
+                                .iter()
+                                .map(|&pred| *self.value_map.get(&(pred, value)).unwrap_or(&value))
+                                .filter(|&val| val != blockparam),
+                        ) {
+                            body.blocks[block].params.pop();
+                            self.new_args[block].pop();
+                            body.values[blockparam] = ValueDef::Alias(pred_value);
+                            self.value_map.insert((block, value), pred_value);
+                        }
+                    }
+                }
             }
         }
     }
@@ -149,8 +171,8 @@ impl MaxSSAPass {
         };
 
         for i in 0..body.blocks[block].insts.len() {
-            let inst = body.blocks[block].insts[i].value;
-            let mut def = core::mem::take(&mut body.values[inst]);
+            let inst = body.blocks[block].insts[i];
+            let mut def = std::mem::take(&mut body.values[inst]);
             match &mut def {
                 ValueDef::Operator(_, args, _) => {
                     for i in 0..args.len() {
@@ -162,15 +184,14 @@ impl MaxSSAPass {
                 ValueDef::PickOutput(value, ..) => {
                     *value = resolve(body, *value);
                 }
-                ValueDef::Alias(_) => {
-                    // Nullify the alias: should no longer be needed.
-                    def = ValueDef::None;
+                ValueDef::Alias(value) => {
+                    *value = resolve(body, *value);
                 }
                 _ => {}
             }
             body.values[inst] = def;
         }
-        let mut term = core::mem::take(&mut body.blocks[block].terminator);
+        let mut term = std::mem::take(&mut body.blocks[block].terminator);
         term.update_uses(|u| {
             *u = resolve(body, *u);
         });

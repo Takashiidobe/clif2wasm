@@ -2,9 +2,6 @@
 
 use crate::entity::EntityRef;
 use crate::ir::{Block, BlockTarget, FunctionBody, Terminator};
-use alloc::borrow::ToOwned;
-use alloc::vec;
-use alloc::vec::Vec;
 
 /// Determines whether a block (i) has no blockparams, and (ii) is
 /// solely a jump to another block. We can remove these blocks.

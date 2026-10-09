@@ -1,65 +1,48 @@
 [package]
-name = "portal-pc-waffle"
-version = "0.5.5"
+name = "waffle"
+version = "0.3.2"
 description = "Wasm Analysis Framework For Lightweight Experiments"
-authors = ["Chris Fallin <chris@cfallin.org>","gkgoat"]
+authors = ["Chris Fallin <chris@cfallin.org>"]
 license = "Apache-2.0 WITH LLVM-exception"
 edition = "2018"
+repository = "https://github.com/bytecodealliance/waffle"
 
 [dependencies]
-wasmparser = { version = "0.227", default-features = false, features = ["simd"] }
-wasm-encoder = { version = "0.227", default-features = false }
-anyhow = { version = "^1.0", default-features = false }
-# structopt = "0.3"
-log = { version = "0.4", default-features = false }
-# env_logger = "0.11"
+wasmparser = { version = "0.248", default-features = false, features = ["std", "validate", "simd"] }
+wasm-encoder = { version = "0.248", default-features = false }
+anyhow = "1.0"
+log = "0.4"
+fxhash = "0.2"
+smallvec = "1.13"
 
-smallvec = { version = "1.13", default-features = false }
-# rayon = "1.10"
-# lazy_static = "1.4"
-# libc = "0.2"
-# addr2line = "0.21"
+# Optional dependencies below.
 
-# For fuzzing only. Versions must match those in fuzz/Cargo.toml.
-libfuzzer-sys = { version = "0.4", optional = true }
-indexmap = { version = "2.2.2", default-features = false }
-stacker = { version = "0.1.15", optional = true }
-wasm-smith = { version = "0.202", optional = true }
-paste = "1.0.15"
-serde = { version = "1.0.204", features = ["derive"] }
-
-
-either = { version = "1.13.0", features = ["serde"], default-features = false }
-arena-traits = "^0.2.3"
-ssa-traits = {version="0.2.3",optional=true}
-cfg-traits = {version="0.2.3",optional=true}
-
-cfg-traits-03 = {version="0.3.0-alpha.2",package="cfg-traits",optional=true}
-ssa-traits-03 = {version="0.3.0-alpha.2",package="ssa-traits",optional=true}
-lending-iterator = "0.1.7"
-hashbrown = { version = "0.15.2", default-features = false, features = ["alloc", "default-hasher", "equivalent", "serde"] }
-impl-trait-for-tuples = "0.2.3"
-sha3 = { version = "0.10.8", default-features = false }
+rayon = { version = "1.10", optional = true }
+addr2line = { version = "0.21", optional = true }
+structopt = { version = "0.3", optional = true }
+env_logger = { version = "0.11", optional = true }
+libfuzzer-sys = { version = "0.4.7", optional = true }
+wasm-smith = { version = "0.248", optional = true }
 
 [dev-dependencies]
-wat = "1.212.0"
+wat = "1.248.0"
 env_logger = "0.11"
-structopt = "0.3.26"
 
 [features]
 default = []
+
+# Enable parallelism in the backend via rayon.
+parallel = ["dep:rayon"]
+
+# Enable DWARF debug-info parsing/preservation via addr2line/gimli.
+dwarf = ["dep:addr2line"]
+
+# Enable the `waffle-util` command-line tool.
+cli = ["dep:structopt", "dep:env_logger"]
+
+# Enable fuzzing entrypoints.
 fuzzing = ["libfuzzer-sys", "wasm-smith"]
-stacker = ["dep:stacker"]
-ssa-traits-02 = ["dep:ssa-traits","dep:cfg-traits"]
-ssa-traits-03 = ["dep:ssa-traits-03","dep:cfg-traits-03"]
-copying=[]
-tcore=[]
-exceptions=[]
-hooking=[]
-importify=[]
 
-[lints.rust]
-warnings = "allow"
-
-[lints.clippy]
-all = "allow"
+[[bin]]
+name = "waffle-util"
+required-features = ["cli"]

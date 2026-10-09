@@ -150,12 +150,11 @@
 
 use crate::entity::EntityRef;
 use crate::{cfg::CFGInfo, cfg::RPOIndex, entity::PerEntity, Block, FunctionBody, Value, ValueDef};
-use alloc::borrow::Cow;
-use alloc::collections::VecDeque;
-use alloc::vec;
-use alloc::vec::Vec;
-use hashbrown::{HashMap as FxHashMap, HashSet as FxHashSet, HashSet};
+use fxhash::FxHashSet as HashSet;
+use fxhash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use std::borrow::Cow;
+use std::collections::VecDeque;
 
 pub struct Reducifier<'a> {
     body: &'a FunctionBody,
@@ -189,6 +188,19 @@ impl<'a> Reducifier<'a> {
         //   stack of headers when we entered their regions and
         //   enforcing LIFO by extending appropriately.
         let cfg = CFGInfo::new(&self.body);
+
+        let mut has_irreducible = false;
+        for (rpo, &block) in cfg.rpo.entries() {
+            for &succ in &self.body.blocks[block].succs {
+                let succ_rpo = cfg.rpo_pos[succ].unwrap();
+                if succ_rpo.index() <= rpo.index() && !cfg.dominates(succ, block) {
+                    has_irreducible = true;
+                }
+            }
+        }
+        if !has_irreducible {
+            return Cow::Borrowed(self.body);
+        }
 
         for (rpo, &block) in cfg.rpo.entries() {
             for &succ in &self.body.blocks[block].succs {
@@ -240,10 +252,6 @@ impl<'a> Reducifier<'a> {
             }
         }
 
-        if irreducible_headers.is_empty() {
-            return Cow::Borrowed(self.body);
-        }
-
         if log::log_enabled!(log::Level::Trace) {
             for block in self.body.blocks.iter() {
                 let mut headers = self.blocks[block]
@@ -284,6 +292,7 @@ impl<'a> Reducifier<'a> {
 
         let mut new_body = self.body.clone();
         let cfg = CFGInfo::new(&new_body);
+        crate::passes::resolve_aliases::run(&mut new_body);
         crate::passes::maxssa::run(&mut new_body, Some(cut_blocks), &cfg);
         crate::passes::resolve_aliases::run(&mut new_body);
 
@@ -334,14 +343,10 @@ impl<'a> Reducifier<'a> {
                 // args yet -- we'll do a separate pass for that.
                 let insts = new_body.blocks[block].insts.clone();
                 for value in insts {
-                    let def = new_body.values[value.value].clone();
+                    let def = new_body.values[value].clone();
                     let new_value = new_body.values.push(def);
-                    value_map.insert((ctx, value.value), new_value);
-                    new_body.blocks[new_block].insts.push({
-                        let mut value = value.clone();
-                        value.value = new_value;
-                        value
-                    });
+                    value_map.insert((ctx, value), new_value);
+                    new_body.blocks[new_block].insts.push(new_value);
                 }
 
                 // Copy over the terminator but don't update yet --
@@ -397,8 +402,8 @@ impl<'a> Reducifier<'a> {
         // value-map available for all blocks and values, regardless
         // of cycles or processing order.
         for (ctx, new_block) in cloned_blocks {
-            for inst in &new_body.blocks[new_block].insts {
-                match &mut new_body.values[inst.value] {
+            for &inst in &new_body.blocks[new_block].insts {
+                match &mut new_body.values[inst] {
                     ValueDef::Operator(_, args, _) => {
                         let new_args = new_body.arg_pool[*args]
                             .iter()
@@ -450,8 +455,6 @@ impl<'a> Reducifier<'a> {
 
 #[cfg(test)]
 mod test {
-    use alloc::string::ToString;
-
     use super::*;
     use crate::{
         entity::EntityRef, BlockTarget, FuncDecl, Module, Operator, SignatureData, Terminator, Type,
@@ -462,10 +465,9 @@ mod test {
         let _ = env_logger::try_init();
 
         let mut module = Module::empty();
-        let sig = module.signatures.push(SignatureData::Func {
+        let sig = module.signatures.push(SignatureData {
             params: vec![Type::I32, Type::I64, Type::F64],
             returns: vec![Type::I64],
-            shared: false,
         });
         let mut body = FunctionBody::new(&module, sig);
 

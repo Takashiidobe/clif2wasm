@@ -273,9 +273,7 @@ pub(crate) fn translate<'a>(
         initial_pages: 1,
         maximum_pages: None,
         segments: vec![],
-        memory64: false,
         shared: opts.shared_memory,
-        page_size_log2: None,
     });
     let sp_global = module.globals.push(GlobalData {
         ty: Type::I32,
@@ -283,14 +281,10 @@ pub(crate) fn translate<'a>(
         mutable: true,
     });
     let table = module.tables.push(TableData {
-        ty: Type::Heap(waffle::WithNullable {
-            value: waffle::HeapType::FuncRef,
-            nullable: true,
-        }),
+        ty: Type::FuncRef,
         initial: 0,
         max: None,
         func_elements: None,
-        table64: false,
     });
 
     // Signatures (interned with dedup — type indices are shared by bodies'
@@ -310,10 +304,9 @@ pub(crate) fn translate<'a>(
                     first_line(&format!("{e:#}"))
                 );
                 force_stub.insert(k);
-                SignatureData::Func {
+                SignatureData {
                     params: vec![],
                     returns: vec![],
-                    shared: false,
                 }
             }
             Err(e) => {

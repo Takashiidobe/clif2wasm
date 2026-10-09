@@ -15,19 +15,15 @@
 //! actual slice. This container is instantiated several times in the
 //! `FunctionBody`, namely for the `arg_pool` and `type_pool`.
 
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::convert::TryFrom;
-use core::fmt::Debug;
-use core::marker::PhantomData;
-use core::ops::{Index, IndexMut};
+use std::convert::TryFrom;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::ops::{Index, IndexMut};
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// A "storage pool" backing many `ListRef`s of the given type.
-
+#[derive(Clone, Debug)]
 pub struct ListPool<T: Clone + Debug> {
-    pub storage: Vec<T>,
+    storage: Vec<T>,
 }
 
 impl<T: Clone + Debug> Default for ListPool<T> {
@@ -36,14 +32,13 @@ impl<T: Clone + Debug> Default for ListPool<T> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 /// A handle to a list stored in a `ListPool`.
 ///
 /// The handle can be used to yield the actual slice, given the pool,
 /// but has much smaller overhead than a separately-owned `Vec`: e.g.,
 /// 8 bytes on 64-bit systems, rather than 24 bytes, and no separate
 /// memory allocation overhead.
-
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ListRef<T>(u32, u32, PhantomData<T>);
 
 impl<T> Default for ListRef<T> {
@@ -63,24 +58,24 @@ impl<T: Clone + Debug> ListPool<T> {
     }
     /// Convenience method: create a list from a single item.
     pub fn single(&mut self, value: T) -> ListRef<T> {
-        self.from_iter(core::iter::once(value))
+        self.from_iter(std::iter::once(value))
     }
     /// Convenience methodS: create a list from exactly two items.
     pub fn double(&mut self, a: T, b: T) -> ListRef<T> {
-        self.from_iter(core::iter::once(a).chain(core::iter::once(b)))
+        self.from_iter(std::iter::once(a).chain(std::iter::once(b)))
     }
     /// Convenience method: create a list from exactly three items.
     pub fn triple(&mut self, a: T, b: T, c: T) -> ListRef<T> {
         self.from_iter(
-            core::iter::once(a)
-                .chain(core::iter::once(b))
-                .chain(core::iter::once(c)),
+            std::iter::once(a)
+                .chain(std::iter::once(b))
+                .chain(std::iter::once(c)),
         )
     }
     /// Allocate a list of the given size with `size` copies of the
     /// value `initial`.
     pub fn allocate(&mut self, size: usize, initial: T) -> ListRef<T> {
-        self.from_iter(core::iter::repeat(initial).take(size))
+        self.from_iter(std::iter::repeat(initial).take(size))
     }
     /// Perform a deep-clone of a list: copy it to a new list and
     /// return the handle of that list.

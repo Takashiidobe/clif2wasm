@@ -7,28 +7,21 @@ use crate::passes::dom_pass::{dom_pass, DomtreePass};
 use crate::pool::ListRef;
 use crate::scoped_map::ScopedMap;
 use crate::Operator;
-use alloc::borrow::ToOwned;
-use alloc::vec;
-use alloc::vec::Vec;
 use smallvec::{smallvec, SmallVec};
-#[non_exhaustive]
+
 #[derive(Clone, Debug)]
 pub struct OptOptions {
     pub gvn: bool,
     pub cprop: bool,
     pub redundant_blockparams: bool,
-    pub inline_refs: bool,
-    pub ub_vaccum: bool,
 }
 
-impl core::default::Default for OptOptions {
+impl std::default::Default for OptOptions {
     fn default() -> Self {
         OptOptions {
             gvn: true,
             cprop: true,
             redundant_blockparams: true,
-            inline_refs: true,
-            ub_vaccum: true,
         }
     }
 }
@@ -67,7 +60,7 @@ impl<'a> DomtreePass for BasicOptPass<'a> {
     }
 }
 
-pub fn value_is_pure(value: Value, body: &FunctionBody) -> bool {
+fn value_is_pure(value: Value, body: &FunctionBody) -> bool {
     match body.values[value] {
         ValueDef::Operator(op, ..) if op.is_pure() => true,
         _ => false,
@@ -164,7 +157,7 @@ impl<'a> BasicOptPass<'a> {
             }
 
             for inst in const_insts_to_insert {
-                body.blocks[block].insts.insert(0, ValueRecord::core(inst));
+                body.blocks[block].insts.insert(0, inst);
             }
 
             remove_all_from_vec(&mut body.blocks[block].params, &blockparams_to_remove[..]);
@@ -177,16 +170,11 @@ impl<'a> BasicOptPass<'a> {
                 });
             }
         }
-        if self.options.ub_vaccum {
-            if let Terminator::UB = &body.blocks[block].terminator {
-                body.blocks[block].insts.clear();
-            }
-        }
 
         // Pass over instructions, updating in place.
         let mut i = 0;
         while i < body.blocks[block].insts.len() {
-            let inst = body.blocks[block].insts[i].value;
+            let inst = body.blocks[block].insts[i];
             i += 1;
             if value_is_pure(inst, body) {
                 let mut value = body.values[inst].clone();
@@ -207,32 +195,6 @@ impl<'a> BasicOptPass<'a> {
                         self.changed |= updated != *val;
                     }
                     _ => {}
-                }
-
-                //Try to inline references
-                if self.options.inline_refs {
-                    if let ValueDef::Operator(op, args, tys) = &value {
-                        if let Operator::CallRef { sig_index } = op {
-                            if let ValueDef::Operator(Operator::RefFunc { func_index }, _, _) =
-                                &body.values[body.arg_pool[*args][0]]
-                            {
-                                let n = body.arg_pool[*args][1..]
-                                    .iter()
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                let n = body.arg_pool.from_iter(n.into_iter());
-                                value = ValueDef::Operator(
-                                    Operator::Call {
-                                        function_index: *func_index,
-                                    },
-                                    n,
-                                    *tys,
-                                );
-                                body.values[inst] = value.clone();
-                                self.changed = true;
-                            }
-                        }
-                    }
                 }
 
                 // Try to constant-propagate.
@@ -303,19 +265,6 @@ impl<'a> BasicOptPass<'a> {
                         continue;
                     }
                     self.map.insert(value, inst);
-                }
-            }
-        }
-        if self.options.inline_refs {
-            if let Terminator::ReturnCallRef { sig, args } = &body.blocks[block].terminator {
-                let mut args = args.clone();
-                let a = args.pop().unwrap();
-                if let ValueDef::Operator(Operator::RefFunc { func_index }, _, _) = &body.values[a]
-                {
-                    body.blocks[block].terminator = Terminator::ReturnCall {
-                        func: *func_index,
-                        args,
-                    }
                 }
             }
         }

@@ -2,18 +2,15 @@
 
 use crate::entity::EntityRef;
 use crate::ir::{Module, Type, Value};
-use crate::{MemoryArg, Operator, SignatureData};
-use alloc::borrow::Cow;
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
-use anyhow::{Context, Result};
+use crate::{MemoryArg, Operator};
+use anyhow::Result;
+use std::borrow::Cow;
 
 /// Given a module and an existing operand stack for context, provide
 /// the type(s) that a given operator requires as inputs.
 pub fn op_inputs(
     module: &Module,
-    op_stack: Option<&[(Type, Value)]>,
+    op_stack: &[(Type, Value)],
     op: &Operator,
 ) -> Result<Cow<'static, [Type]>> {
     match op {
@@ -21,30 +18,15 @@ pub fn op_inputs(
 
         &Operator::Call { function_index } => {
             let sig = module.funcs[function_index].sig();
-            let SignatureData::Func {
-                params, returns, ..
-            } = &module.signatures[sig]
-            else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Vec::from(params.clone()).into())
+            Ok(Vec::from(module.signatures[sig].params.clone()).into())
         }
         &Operator::CallIndirect { sig_index, .. } => {
-            let SignatureData::Func {
-                params, returns, ..
-            } = &module.signatures[sig_index]
-            else {
-                anyhow::bail!("invalid signature")
-            };
-            let mut params = params.to_vec();
+            let mut params = module.signatures[sig_index].params.to_vec();
             params.push(Type::I32);
             Ok(params.into())
         }
 
         &Operator::Select => {
-            let Some(op_stack) = op_stack else {
-                anyhow::bail!("selects cannot be typed with no stack");
-            };
             let val_ty = op_stack[op_stack.len() - 2].0;
             Ok(vec![val_ty, val_ty, Type::I32].into())
         }
@@ -53,72 +35,97 @@ pub fn op_inputs(
         &Operator::GlobalGet { .. } => Ok(Cow::Borrowed(&[])),
         &Operator::GlobalSet { global_index } => Ok(vec![module.globals[global_index].ty].into()),
 
-        Operator::I32Load { memory }
-        | Operator::I64Load { memory }
-        | Operator::F32Load { memory }
-        | Operator::F64Load { memory }
-        | Operator::I32Load8S { memory }
-        | Operator::I32Load8U { memory }
-        | Operator::I32Load16S { memory }
-        | Operator::I32Load16U { memory }
-        | Operator::I64Load8S { memory }
-        | Operator::I64Load8U { memory }
-        | Operator::I64Load16S { memory }
-        | Operator::I64Load16U { memory }
-        | Operator::I64Load32S { memory }
-        | Operator::I64Load32U { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
+        Operator::I32Load { .. }
+        | Operator::I64Load { .. }
+        | Operator::F32Load { .. }
+        | Operator::F64Load { .. }
+        | Operator::I32Load8S { .. }
+        | Operator::I32Load8U { .. }
+        | Operator::I32Load16S { .. }
+        | Operator::I32Load16U { .. }
+        | Operator::I64Load8S { .. }
+        | Operator::I64Load8U { .. }
+        | Operator::I64Load16S { .. }
+        | Operator::I64Load16U { .. }
+        | Operator::I64Load32S { .. }
+        | Operator::I64Load32U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
 
-        Operator::I32Store { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }),
-        Operator::I64Store { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }),
-        Operator::F32Store { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::F32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::F32])
-        }),
-        Operator::F64Store { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::F64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::F64])
-        }),
-        Operator::I32Store8 { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }),
-        Operator::I32Store16 { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }),
-        Operator::I64Store8 { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }),
-        Operator::I64Store16 { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }),
-        Operator::I64Store32 { memory } => Ok(if module.memories[memory.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }),
+        Operator::I32Store { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64Store { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::F32Store { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::F32])),
+        Operator::F64Store { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::F64])),
+        Operator::I32Store8 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32Store16 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64Store8 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64Store16 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64Store32 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::MemoryAtomicNotify { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::MemoryAtomicWait32 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I64])),
+        Operator::MemoryAtomicWait64 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])),
+        Operator::AtomicFence => Ok(Cow::Borrowed(&[])),
+        Operator::I32AtomicLoad { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicLoad { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicLoad8U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicLoad16U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicLoad8U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicLoad16U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicLoad32U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicStore { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicStore { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicStore8 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicStore16 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicStore8 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicStore16 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicStore32 { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwAdd { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmwAdd { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmw8AddU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16AddU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8AddU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw16AddU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw32AddU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwSub { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmwSub { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmw8SubU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16SubU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8SubU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw16SubU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw32SubU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwAnd { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmwAnd { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmw8AndU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16AndU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8AndU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw16AndU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw32AndU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwOr { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmwOr { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmw8OrU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16OrU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8OrU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw16OrU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw32OrU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwXor { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmwXor { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmw8XorU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16XorU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8XorU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw16XorU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw32XorU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwXchg { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmwXchg { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmw8XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw16XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I64AtomicRmw32XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64])),
+        Operator::I32AtomicRmwCmpxchg { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])),
+        Operator::I64AtomicRmwCmpxchg { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])),
+        Operator::I32AtomicRmw8CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])),
+        Operator::I32AtomicRmw16CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])),
+        Operator::I64AtomicRmw8CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])),
+        Operator::I64AtomicRmw16CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])),
+        Operator::I64AtomicRmw32CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])),
 
         Operator::I32Const { .. }
         | Operator::I64Const { .. }
@@ -274,194 +281,41 @@ pub fn op_inputs(
         Operator::F64ReinterpretI64 => Ok(Cow::Borrowed(&[Type::I64])),
         Operator::I32ReinterpretF32 => Ok(Cow::Borrowed(&[Type::F32])),
         Operator::I64ReinterpretF64 => Ok(Cow::Borrowed(&[Type::F64])),
-        Operator::TableGet { table_index } => {
-            if module.tables[*table_index].table64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
+        Operator::TableGet { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::TableSet { table_index } => {
+            Ok(vec![Type::I32, module.tables[*table_index].ty].into())
         }
-        Operator::TableSet { table_index } => Ok(vec![
-            if module.tables[*table_index].table64 {
-                Type::I64
-            } else {
-                Type::I32
-            },
-            module.tables[*table_index].ty,
-        ]
-        .into()),
-        Operator::TableGrow { table_index } => Ok(vec![
-            if module.tables[*table_index].table64 {
-                Type::I64
-            } else {
-                Type::I32
-            },
-            module.tables[*table_index].ty,
-        ]
-        .into()),
+        Operator::TableGrow { table_index } => {
+            Ok(vec![Type::I32, module.tables[*table_index].ty].into())
+        }
         Operator::TableSize { .. } => Ok(Cow::Borrowed(&[])),
         Operator::MemorySize { .. } => Ok(Cow::Borrowed(&[])),
-        Operator::MemoryGrow { mem } => Ok(if module.memories[*mem].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }),
+        Operator::MemoryGrow { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::MemoryCopy { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])),
+        Operator::MemoryFill { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])),
 
-        Operator::V128Load { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load8x8S { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load8x8U { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load16x4S { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load16x4U { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load32x2S { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load32x2U { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load8Splat { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load16Splat { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load32Splat { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load64Splat { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load32Zero { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Load64Zero { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32]))
-            }
-        }
-        Operator::V128Store { memory } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Load8Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-
-        Operator::V128Load16Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Load32Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Load64Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Store8Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Store16Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Store32Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
-        Operator::V128Store64Lane { memory, .. } => {
-            if module.memories[memory.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::V128]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::V128]))
-            }
-        }
+        Operator::V128Load { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load8x8S { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load8x8U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load16x4S { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load16x4U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load32x2S { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load32x2U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load8Splat { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load16Splat { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load32Splat { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load64Splat { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load32Zero { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Load64Zero { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::V128Store { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Load8Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Load16Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Load32Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Load64Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Store8Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Store16Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Store32Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
+        Operator::V128Store64Lane { .. } => Ok(Cow::Borrowed(&[Type::I32, Type::V128])),
 
         Operator::V128Const { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I8x16Shuffle { .. } => Ok(Cow::Borrowed(&[Type::V128, Type::V128])),
@@ -695,541 +549,13 @@ pub fn op_inputs(
         Operator::F64x2PromoteLowF32x4 => Ok(Cow::Borrowed(&[Type::V128])),
 
         Operator::CallRef { sig_index } => {
-            let SignatureData::Func {
-                params, returns, ..
-            } = &module.signatures[*sig_index]
-            else {
-                anyhow::bail!("invalid signature")
-            };
-            let mut params = params.to_vec();
-            params.push(Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig {
-                    sig_index: *sig_index,
-                },
-                nullable: true,
-            }));
+            let mut params = module.signatures[*sig_index].params.to_vec();
+            params.push(Type::TypedFuncRef(true, sig_index.index() as u32));
             Ok(params.into())
         }
-        Operator::RefIsNull => {
-            Ok(vec![op_stack.context("in getting stack")?.last().unwrap().0].into())
-        }
-        Operator::RefNull { ty } => Ok(Cow::Borrowed(&[])),
+        Operator::RefIsNull => Ok(vec![op_stack.last().unwrap().0].into()),
+        Operator::RefNull { .. } => Ok(Cow::Borrowed(&[])),
         Operator::RefFunc { .. } => Ok(Cow::Borrowed(&[])),
-        Operator::MemoryCopy { dst_mem, src_mem } => match (
-            module.memories[*dst_mem].memory64,
-            module.memories[*src_mem].memory64,
-        ) {
-            (false, false) => Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])),
-            (false, true) => Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I32])),
-            (true, false) => Ok(Cow::Borrowed(&[Type::I64, Type::I32, Type::I32])),
-            (true, true) => Ok(Cow::Borrowed(&[Type::I64, Type::I64, Type::I32])),
-        },
-        Operator::MemoryFill { mem, .. } => {
-            if module.memories[*mem].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::I32, Type::I32]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32]))
-            }
-        }
-
-        Operator::MemoryAtomicNotify { memarg } => {
-            if module.memories[memarg.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::I32]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::I32]))
-            }
-        } //=> visit_memory_atomic_notify
-        Operator::MemoryAtomicWait32 { memarg } => {
-            if module.memories[memarg.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::I32, Type::I32]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::I32, Type::I32]))
-            }
-        } //=> visit_memory_atomic_wait32
-        Operator::MemoryAtomicWait64 { memarg } => {
-            if module.memories[memarg.memory].memory64 {
-                Ok(Cow::Borrowed(&[Type::I64, Type::I64, Type::I32]))
-            } else {
-                Ok(Cow::Borrowed(&[Type::I32, Type::I64, Type::I32]))
-            }
-        } //=> visit_memory_atomic_wait64
-        Operator::AtomicFence => Ok(Cow::Borrowed(&[])), // => visit_atomic_fence
-        Operator::I32AtomicLoad { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i32_atomic_load
-        Operator::I64AtomicLoad { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i64_atomic_load
-        Operator::I32AtomicLoad8U { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i32_atomic_load8_u
-        Operator::I32AtomicLoad16U { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i32_atomic_load16_u
-        Operator::I64AtomicLoad8U { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i64_atomic_load8_u
-        Operator::I64AtomicLoad16U { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i64_atomic_load16_u
-        Operator::I64AtomicLoad32U { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }), //=> visit_i64_atomic_load32_u
-        Operator::I32AtomicStore { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_store
-        Operator::I64AtomicStore { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_store
-        Operator::I32AtomicStore8 { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_store8
-        Operator::I32AtomicStore16 { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_store16
-        Operator::I64AtomicStore8 { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_store8
-        Operator::I64AtomicStore16 { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_store16
-        Operator::I64AtomicStore32 { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_store32
-        Operator::I32AtomicRmwAdd { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw_add
-        Operator::I64AtomicRmwAdd { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw_add
-        Operator::I32AtomicRmw8AddU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw8_add_u
-        Operator::I32AtomicRmw16AddU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw16_add_u
-        Operator::I64AtomicRmw8AddU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw8_add_u
-        Operator::I64AtomicRmw16AddU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw16_add_u
-        Operator::I64AtomicRmw32AddU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw32_add_u
-        // Operator::I32AtomicRmwSub { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw_sub
-        // Operator::I64AtomicRmwSub { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw_sub
-        // Operator::I32AtomicRmw8SubU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw8_sub_u
-        // Operator::I32AtomicRmw16SubU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw16_sub_u
-        // Operator::I64AtomicRmw8SubU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw8_sub_u
-        // Operator::I64AtomicRmw16SubU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw16_sub_u
-        // Operator::I64AtomicRmw32SubU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw32_sub_u
-        Operator::I32AtomicRmwSub { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw_add
-        Operator::I64AtomicRmwSub { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw_Sub
-        Operator::I32AtomicRmw8SubU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw8_Sub_u
-        Operator::I32AtomicRmw16SubU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw16_Sub_u
-        Operator::I64AtomicRmw8SubU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw8_Sub_u
-        Operator::I64AtomicRmw16SubU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw16_Sub_u
-        Operator::I64AtomicRmw32SubU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw32_Sub_u
-        // Operator::I32AtomicRmwAnd { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw_and
-        // Operator::I64AtomicRmwAnd { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw_and
-        // Operator::I32AtomicRmw8AndU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw8_and_u
-        // Operator::I32AtomicRmw16AndU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw16_and_u
-        // Operator::I64AtomicRmw8AndU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw8_and_u
-        // Operator::I64AtomicRmw16AndU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw16_and_u
-        // Operator::I64AtomicRmw32AndU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw32_and_u
-        Operator::I32AtomicRmwAnd { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw_And
-        Operator::I64AtomicRmwAnd { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw_And
-        Operator::I32AtomicRmw8AndU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw8_And_u
-        Operator::I32AtomicRmw16AndU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw16_And_u
-        Operator::I64AtomicRmw8AndU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw8_And_u
-        Operator::I64AtomicRmw16AndU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw16_And_u
-        Operator::I64AtomicRmw32AndU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw32_And_u
-        // Operator::I32AtomicRmwOr { memarg }, // => visit_i32_atomic_rmw_or
-        // Operator::I64AtomicRmwOr { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_or
-        // Operator::I32AtomicRmw8OrU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw8_or_u
-        // Operator::I32AtomicRmw16OrU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw16_or_u
-        // Operator::I64AtomicRmw8OrU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw8_or_u
-        // Operator::I64AtomicRmw16OrU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw16_or_u
-        // Operator::I64AtomicRmw32OrU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_or_u
-        Operator::I32AtomicRmwOr { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw_Or
-        Operator::I64AtomicRmwOr { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw_Or
-        Operator::I32AtomicRmw8OrU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw8_Or_u
-        Operator::I32AtomicRmw16OrU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw16_Or_u
-        Operator::I64AtomicRmw8OrU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw8_Or_u
-        Operator::I64AtomicRmw16OrU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw16_Or_u
-        Operator::I64AtomicRmw32OrU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw32_Or_u
-        // Operator::I32AtomicRmwXor { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw_xor
-        // Operator::I64AtomicRmwXor { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_xor
-        // Operator::I32AtomicRmw8XorU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw8_xor_u
-        // Operator::I32AtomicRmw16XorU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw16_xor_u
-        // Operator::I64AtomicRmw8XorU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw8_xor_u
-        // Operator::I64AtomicRmw16XorU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw16_xor_u
-        // Operator::I64AtomicRmw32XorU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_xor_u
-        Operator::I32AtomicRmwXor { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw_Xor
-        Operator::I64AtomicRmwXor { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw_Xor
-        Operator::I32AtomicRmw8XorU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw8_Xor_u
-        Operator::I32AtomicRmw16XorU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw16_Xor_u
-        Operator::I64AtomicRmw8XorU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw8_Xor_u
-        Operator::I64AtomicRmw16XorU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw16_Xor_u
-        Operator::I64AtomicRmw32XorU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw32_Xor_u
-        // Operator::I32AtomicRmwXchg { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw_xchg
-        // Operator::I64AtomicRmwXchg { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_xchg
-        // Operator::I32AtomicRmw8XchgU { memarg },// => visit_i32_atomic_rmw8_xchg_u
-        // Operator::I32AtomicRmw16XchgU { memarg },// => visit_i32_atomic_rmw16_xchg_u
-        // Operator::I64AtomicRmw8XchgU { memarg },// => visit_i64_atomic_rmw8_xchg_u
-        // Operator::I64AtomicRmw16XchgU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw16_xchg_u
-        // Operator::I64AtomicRmw32XchgU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_xchg_u
-        Operator::I32AtomicRmwXchg { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw_Xchg
-        Operator::I64AtomicRmwXchg { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw_Xchg
-        Operator::I32AtomicRmw8XchgU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I32])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I32])
-        }), //=> visit_i32_atomic_rmw8_Xchg_u
-        Operator::I32AtomicRmw16XchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I32])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I32])
-            })
-        } //=> visit_i32_atomic_rmw16_Xchg_u
-        Operator::I64AtomicRmw8XchgU { memarg } => Ok(if module.memories[memarg.memory].memory64 {
-            Cow::Borrowed(&[Type::I64, Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32, Type::I64])
-        }), //=> visit_i64_atomic_rmw8_Xchg_u
-        Operator::I64AtomicRmw16XchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I64])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I64])
-            })
-        } //=> visit_i64_atomic_rmw16_Xchg_u
-        Operator::I64AtomicRmw32XchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I64])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I64])
-            })
-        } //=> visit_i64_atomic_rmw32_Xchg_u
-        Operator::I32AtomicRmwCmpxchg { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I32, Type::I32])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])
-            })
-        } //=> visit_i32_atomic_rmw_cmpxchg
-        Operator::I64AtomicRmwCmpxchg { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I64, Type::I64])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])
-            })
-        } //=> visit_i64_atomic_rmw_cmpxchg
-        Operator::I32AtomicRmw8CmpxchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I32, Type::I32])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])
-            })
-        } // => visit_i32_atomic_rmw8_cmpxchg_u
-        Operator::I32AtomicRmw16CmpxchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I32, Type::I32])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I32, Type::I32])
-            })
-        } // => visit_i32_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw8CmpxchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I64, Type::I64])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])
-            })
-        } // => visit_i64_atomic_rmw8_cmpxchg_u
-        Operator::I64AtomicRmw16CmpxchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I64, Type::I64])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])
-            })
-        } // => visit_i64_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw32CmpxchgU { memarg } => {
-            Ok(if module.memories[memarg.memory].memory64 {
-                Cow::Borrowed(&[Type::I64, Type::I64, Type::I64])
-            } else {
-                Cow::Borrowed(&[Type::I32, Type::I64, Type::I64])
-            })
-        } //=> visit_i64_atomic_rmw32_c
-        &Operator::StructNew { sig } => {
-            let SignatureData::Struct { fields, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(
-                fields.iter().map(|a| a.value.clone().unpack()).collect(),
-            ))
-        }
-        &Operator::StructGet { sig, idx } => {
-            let SignatureData::Struct { fields, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: sig },
-                nullable: true,
-            })]))
-        }
-        &Operator::StructSet { sig, idx } => {
-            let SignatureData::Struct { fields, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![
-                Type::Heap(crate::WithNullable {
-                    value: crate::HeapType::Sig { sig_index: sig },
-                    nullable: true,
-                }),
-                fields
-                    .get(idx)
-                    .context("in getting the field")?
-                    .clone()
-                    .value
-                    .unpack(),
-            ]))
-        }
-        &Operator::ArrayNew { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![ty.value.clone().unpack(), Type::I32]))
-        }
-        &Operator::ArrayNewFixed { sig, num } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(
-                (0..num).map(|a| ty.value.clone().unpack()).collect(),
-            ))
-        }
-        &Operator::ArrayGet { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: sig },
-                nullable: true,
-            })]))
-        }
-        &Operator::ArraySet { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![
-                Type::Heap(crate::WithNullable {
-                    value: crate::HeapType::Sig { sig_index: sig },
-                    nullable: true,
-                }),
-                ty.value.clone().unpack(),
-            ]))
-        }
-        &Operator::ArrayFill { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![
-                Type::Heap(crate::WithNullable {
-                    value: crate::HeapType::Sig { sig_index: sig },
-                    nullable: true,
-                }),
-                Type::I32,
-                ty.value.clone().unpack(),
-                Type::I32,
-            ]))
-        }
-        &Operator::ArrayCopy { dest, src } => Ok(Cow::Owned(vec![
-            Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: dest },
-                nullable: true,
-            }),
-            Type::I32,
-            Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: src },
-                nullable: true,
-            }),
-            Type::I32,
-            Type::I32,
-        ])),
-        &Operator::ArrayLen => Ok(Cow::Borrowed(&[Type::Heap(crate::WithNullable {
-            value: crate::HeapType::Array,
-            nullable: true,
-        })])),
-        &Operator::RefTest { ty } => Ok(Cow::Owned(vec![
-            op_stack.context("in getting the op stack")?[0].0,
-        ])),
-        &Operator::RefCast { ty } => Ok(Cow::Owned(vec![
-            op_stack.context("in getting the op stack")?[0].0,
-        ])),
     }
 }
 
@@ -1237,7 +563,7 @@ pub fn op_inputs(
 /// the type(s) that a given operator provides as outputs.
 pub fn op_outputs(
     module: &Module,
-    op_stack: Option<&[(Type, Value)]>,
+    op_stack: &[(Type, Value)],
     op: &Operator,
 ) -> Result<Cow<'static, [Type]>> {
     match op {
@@ -1245,28 +571,13 @@ pub fn op_outputs(
 
         &Operator::Call { function_index } => {
             let sig = module.funcs[function_index].sig();
-            let SignatureData::Func {
-                params, returns, ..
-            } = &module.signatures[sig]
-            else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Vec::from(returns.clone()).into())
+            Ok(Vec::from(module.signatures[sig].returns.clone()).into())
         }
         &Operator::CallIndirect { sig_index, .. } => {
-            let SignatureData::Func {
-                params, returns, ..
-            } = &module.signatures[sig_index]
-            else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Vec::from(returns.clone()).into())
+            Ok(Vec::from(module.signatures[sig_index].returns.clone()).into())
         }
 
         &Operator::Select => {
-            let Some(op_stack) = op_stack else {
-                anyhow::bail!("selects cannot be typed with no stack");
-            };
             let val_ty = op_stack[op_stack.len() - 2].0;
             Ok(vec![val_ty].into())
         }
@@ -1286,15 +597,6 @@ pub fn op_outputs(
         | Operator::I64Load16U { .. }
         | Operator::I64Load32S { .. }
         | Operator::I64Load32U { .. } => Ok(Cow::Borrowed(&[Type::I64])),
-
-        Operator::I32AtomicLoad { .. }
-        | Operator::I32AtomicLoad8U { .. }
-        | Operator::I32AtomicLoad16U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
-        Operator::I64AtomicLoad { .. }
-        | Operator::I64AtomicLoad8U { .. }
-        | Operator::I64AtomicLoad16U { .. }
-        | Operator::I64AtomicLoad32U { .. } => Ok(Cow::Borrowed(&[Type::I64])),
-
         Operator::F32Load { .. } => Ok(Cow::Borrowed(&[Type::F32])),
         Operator::F64Load { .. } => Ok(Cow::Borrowed(&[Type::F64])),
 
@@ -1307,7 +609,17 @@ pub fn op_outputs(
         Operator::I64Store8 { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I64Store16 { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I64Store32 { .. } => Ok(Cow::Borrowed(&[])),
-
+        Operator::MemoryAtomicNotify { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::MemoryAtomicWait32 { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::MemoryAtomicWait64 { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::AtomicFence => Ok(Cow::Borrowed(&[])),
+        Operator::I32AtomicLoad { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicLoad { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicLoad8U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicLoad16U { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicLoad8U { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicLoad16U { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicLoad32U { .. } => Ok(Cow::Borrowed(&[Type::I64])),
         Operator::I32AtomicStore { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I64AtomicStore { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I32AtomicStore8 { .. } => Ok(Cow::Borrowed(&[])),
@@ -1315,6 +627,55 @@ pub fn op_outputs(
         Operator::I64AtomicStore8 { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I64AtomicStore16 { .. } => Ok(Cow::Borrowed(&[])),
         Operator::I64AtomicStore32 { .. } => Ok(Cow::Borrowed(&[])),
+        Operator::I32AtomicRmwAdd { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwAdd { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8AddU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16AddU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8AddU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16AddU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32AddU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmwSub { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwSub { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8SubU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16SubU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8SubU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16SubU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32SubU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmwAnd { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwAnd { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8AndU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16AndU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8AndU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16AndU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32AndU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmwOr { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwOr { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8OrU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16OrU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8OrU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16OrU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32OrU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmwXor { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwXor { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8XorU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16XorU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8XorU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16XorU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32XorU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmwXchg { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwXchg { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16XchgU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8XchgU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16XchgU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32XchgU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmwCmpxchg { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmwCmpxchg { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I32AtomicRmw8CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I32AtomicRmw16CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::I64AtomicRmw8CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw16CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
+        Operator::I64AtomicRmw32CmpxchgU { .. } => Ok(Cow::Borrowed(&[Type::I64])),
 
         Operator::I32Const { .. } => Ok(Cow::Borrowed(&[Type::I32])),
         Operator::I64Const { .. } => Ok(Cow::Borrowed(&[Type::I64])),
@@ -1465,23 +826,9 @@ pub fn op_outputs(
         Operator::TableGet { table_index } => Ok(vec![module.tables[*table_index].ty].into()),
         Operator::TableSet { .. } => Ok(Cow::Borrowed(&[])),
         Operator::TableGrow { .. } => Ok(Cow::Borrowed(&[])),
-        Operator::TableSize { table_index } => {
-            Ok(Cow::Borrowed(if module.tables[*table_index].table64 {
-                &[Type::I64]
-            } else {
-                &[Type::I32]
-            }))
-        }
-        Operator::MemorySize { mem } => Ok(if module.memories[*mem].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }),
-        Operator::MemoryGrow { mem } => Ok(if module.memories[*mem].memory64 {
-            Cow::Borrowed(&[Type::I64])
-        } else {
-            Cow::Borrowed(&[Type::I32])
-        }),
+        Operator::TableSize { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::MemorySize { .. } => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::MemoryGrow { .. } => Ok(Cow::Borrowed(&[Type::I32])),
         Operator::MemoryCopy { .. } => Ok(Cow::Borrowed(&[])),
         Operator::MemoryFill { .. } => Ok(Cow::Borrowed(&[])),
 
@@ -1740,144 +1087,16 @@ pub fn op_outputs(
         Operator::F64x2PromoteLowF32x4 => Ok(Cow::Borrowed(&[Type::V128])),
 
         Operator::CallRef { sig_index } => {
-            let SignatureData::Func {
-                params, returns, ..
-            } = &module.signatures[*sig_index]
-            else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Vec::from(returns.clone()).into())
+            Ok(Vec::from(module.signatures[*sig_index].returns.clone()).into())
         }
         Operator::RefIsNull => Ok(Cow::Borrowed(&[Type::I32])),
+        Operator::RefNull { sig_index } => {
+            Ok(vec![Type::TypedFuncRef(true, sig_index.index() as u32)].into())
+        }
         Operator::RefFunc { func_index } => {
             let ty = module.funcs[*func_index].sig();
-            Ok(vec![Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: ty },
-                nullable: true,
-            })]
-            .into())
+            Ok(vec![Type::TypedFuncRef(true, ty.index() as u32)].into())
         }
-        Operator::RefNull { ty } => Ok(vec![ty.clone()].into()),
-
-        Operator::MemoryAtomicNotify { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_memory_atomic_notify
-        Operator::MemoryAtomicWait32 { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_memory_atomic_wait32
-        Operator::MemoryAtomicWait64 { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_memory_atomic_wait64
-        Operator::AtomicFence => Ok(Cow::Borrowed(&[])), // => visit_atomic_fence
-        Operator::I32AtomicRmwAdd { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw_add
-        Operator::I64AtomicRmwAdd { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_add
-        Operator::I32AtomicRmw8AddU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw8_add_u
-        Operator::I32AtomicRmw16AddU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw16_add_u
-        Operator::I64AtomicRmw8AddU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw8_add_u
-        Operator::I64AtomicRmw16AddU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw16_add_u
-        Operator::I64AtomicRmw32AddU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_add_u
-        Operator::I32AtomicRmwSub { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw_sub
-        Operator::I64AtomicRmwSub { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_sub
-        Operator::I32AtomicRmw8SubU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw8_sub_u
-        Operator::I32AtomicRmw16SubU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw16_sub_u
-        Operator::I64AtomicRmw8SubU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw8_sub_u
-        Operator::I64AtomicRmw16SubU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw16_sub_u
-        Operator::I64AtomicRmw32SubU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_sub_u
-        Operator::I32AtomicRmwAnd { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw_and
-        Operator::I64AtomicRmwAnd { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_and
-        Operator::I32AtomicRmw8AndU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw8_and_u
-        Operator::I32AtomicRmw16AndU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw16_and_u
-        Operator::I64AtomicRmw8AndU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw8_and_u
-        Operator::I64AtomicRmw16AndU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw16_and_u
-        Operator::I64AtomicRmw32AndU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_and_u
-        Operator::I32AtomicRmwOr { memarg } => Ok(Cow::Borrowed(&[Type::I32])), // => visit_i32_atomic_rmw_or
-        Operator::I64AtomicRmwOr { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_or
-        Operator::I32AtomicRmw8OrU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw8_or_u
-        Operator::I32AtomicRmw16OrU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw16_or_u
-        Operator::I64AtomicRmw8OrU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw8_or_u
-        Operator::I64AtomicRmw16OrU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw16_or_u
-        Operator::I64AtomicRmw32OrU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_or_u
-        Operator::I32AtomicRmwXor { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw_xor
-        Operator::I64AtomicRmwXor { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_xor
-        Operator::I32AtomicRmw8XorU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw8_xor_u
-        Operator::I32AtomicRmw16XorU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw16_xor_u
-        Operator::I64AtomicRmw8XorU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw8_xor_u
-        Operator::I64AtomicRmw16XorU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw16_xor_u
-        Operator::I64AtomicRmw32XorU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_xor_u
-        Operator::I32AtomicRmwXchg { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw_xchg
-        Operator::I64AtomicRmwXchg { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_xchg
-        Operator::I32AtomicRmw8XchgU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), // => visit_i32_atomic_rmw8_xchg_u
-        Operator::I32AtomicRmw16XchgU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), // => visit_i32_atomic_rmw16_xchg_u
-        Operator::I64AtomicRmw8XchgU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), // => visit_i64_atomic_rmw8_xchg_u
-        Operator::I64AtomicRmw16XchgU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw16_xchg_u
-        Operator::I64AtomicRmw32XchgU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_xchg_u
-        Operator::I32AtomicRmwCmpxchg { memarg } => Ok(Cow::Borrowed(&[Type::I32])), //=> visit_i32_atomic_rmw_cmpxchg
-        Operator::I64AtomicRmwCmpxchg { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw_cmpxchg
-        Operator::I32AtomicRmw8CmpxchgU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), // => visit_i32_atomic_rmw8_cmpxchg_u
-        Operator::I32AtomicRmw16CmpxchgU { memarg } => Ok(Cow::Borrowed(&[Type::I32])), // => visit_i32_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw8CmpxchgU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), // => visit_i64_atomic_rmw8_cmpxchg_u
-        Operator::I64AtomicRmw16CmpxchgU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), // => visit_i64_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw32CmpxchgU { memarg } => Ok(Cow::Borrowed(&[Type::I64])), //=> visit_i64_atomic_rmw32_c
-        &Operator::StructNew { sig } => {
-            let SignatureData::Struct { fields, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: sig },
-                nullable: true,
-            })]))
-        }
-        &Operator::StructGet { sig, idx } => {
-            let SignatureData::Struct { fields, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![fields
-                .get(idx)
-                .context("in getting the field")?
-                .clone()
-                .value
-                .unpack()]))
-        }
-        &Operator::StructSet { sig, idx } => {
-            let SignatureData::Struct { fields, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Borrowed(&[]))
-        }
-        &Operator::ArrayNew { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: sig },
-                nullable: false,
-            })]))
-        }
-        &Operator::ArrayNewFixed { sig, num } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![Type::Heap(crate::WithNullable {
-                value: crate::HeapType::Sig { sig_index: sig },
-                nullable: false,
-            })]))
-        }
-        &Operator::ArrayGet { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Owned(vec![ty.value.clone().unpack()]))
-        }
-        &Operator::ArraySet { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Borrowed(&[]))
-        }
-        &Operator::ArrayFill { sig } => {
-            let SignatureData::Array { ty, .. } = &module.signatures[sig] else {
-                anyhow::bail!("invalid signature")
-            };
-            Ok(Cow::Borrowed(&[]))
-        }
-        &Operator::ArrayCopy { dest, src } => Ok(Cow::Borrowed(&[])),
-        Operator::ArrayLen => Ok(Cow::Borrowed(&[Type::I32])),
-        &Operator::RefTest { ty } => Ok(Cow::Borrowed(&[Type::I32])),
-        &Operator::RefCast { ty } => Ok(Cow::Owned(vec![ty])),
     }
 }
 
@@ -1904,7 +1123,6 @@ pub enum SideEffect {
     WriteLocal,
     /// Operator can have any of the above effects.
     All,
-    AtomicStuff,
 }
 
 impl Operator {
@@ -1948,6 +1166,73 @@ impl Operator {
             | Operator::I64Store8 { .. }
             | Operator::I64Store16 { .. }
             | Operator::I64Store32 { .. } => &[Trap, WriteMem],
+            Operator::MemoryAtomicNotify { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::MemoryAtomicWait32 { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::MemoryAtomicWait64 { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::AtomicFence => &[ReadMem, WriteMem],
+            Operator::I32AtomicLoad { .. } => &[Trap, ReadMem],
+            Operator::I64AtomicLoad { .. } => &[Trap, ReadMem],
+            Operator::I32AtomicLoad8U { .. } => &[Trap, ReadMem],
+            Operator::I32AtomicLoad16U { .. } => &[Trap, ReadMem],
+            Operator::I64AtomicLoad8U { .. } => &[Trap, ReadMem],
+            Operator::I64AtomicLoad16U { .. } => &[Trap, ReadMem],
+            Operator::I64AtomicLoad32U { .. } => &[Trap, ReadMem],
+            Operator::I32AtomicStore { .. } => &[Trap, WriteMem],
+            Operator::I64AtomicStore { .. } => &[Trap, WriteMem],
+            Operator::I32AtomicStore8 { .. } => &[Trap, WriteMem],
+            Operator::I32AtomicStore16 { .. } => &[Trap, WriteMem],
+            Operator::I64AtomicStore8 { .. } => &[Trap, WriteMem],
+            Operator::I64AtomicStore16 { .. } => &[Trap, WriteMem],
+            Operator::I64AtomicStore32 { .. } => &[Trap, WriteMem],
+            Operator::I32AtomicRmwAdd { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwAdd { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8AddU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16AddU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8AddU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16AddU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32AddU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmwSub { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwSub { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8SubU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16SubU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8SubU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16SubU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32SubU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmwAnd { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwAnd { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8AndU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16AndU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8AndU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16AndU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32AndU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmwOr { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwOr { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8OrU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16OrU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8OrU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16OrU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32OrU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmwXor { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwXor { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8XorU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16XorU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8XorU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16XorU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32XorU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmwXchg { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwXchg { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8XchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16XchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8XchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16XchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32XchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmwCmpxchg { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmwCmpxchg { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw8CmpxchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I32AtomicRmw16CmpxchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw8CmpxchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw16CmpxchgU { .. } => &[Trap, ReadMem, WriteMem],
+            Operator::I64AtomicRmw32CmpxchgU { .. } => &[Trap, ReadMem, WriteMem],
 
             Operator::I32Const { .. }
             | Operator::I64Const { .. }
@@ -2360,88 +1645,8 @@ impl Operator {
 
             Operator::CallRef { .. } => &[All],
             Operator::RefIsNull => &[],
+            Operator::RefNull { .. } => &[],
             Operator::RefFunc { .. } => &[],
-            Operator::RefNull { ty } => &[],
-
-            Operator::MemoryAtomicNotify { memarg } => &[AtomicStuff], //=> visit_memory_atomic_notify
-            Operator::MemoryAtomicWait32 { memarg } => &[AtomicStuff], //=> visit_memory_atomic_wait32
-            Operator::MemoryAtomicWait64 { memarg } => &[AtomicStuff], //=> visit_memory_atomic_wait64
-            Operator::AtomicFence => &[AtomicStuff],                   // => visit_atomic_fence
-            Operator::I32AtomicLoad { memarg } => &[AtomicStuff, ReadMem], //=> visit_i32_atomic_load
-            Operator::I64AtomicLoad { memarg } => &[AtomicStuff, ReadMem], //=> visit_i64_atomic_load
-            Operator::I32AtomicLoad8U { memarg } => &[AtomicStuff, ReadMem], //=> visit_i32_atomic_load8_u
-            Operator::I32AtomicLoad16U { memarg } => &[AtomicStuff, ReadMem], //=> visit_i32_atomic_load16_u
-            Operator::I64AtomicLoad8U { memarg } => &[AtomicStuff, ReadMem], //=> visit_i64_atomic_load8_u
-            Operator::I64AtomicLoad16U { memarg } => &[AtomicStuff, ReadMem], //=> visit_i64_atomic_load16_u
-            Operator::I64AtomicLoad32U { memarg } => &[AtomicStuff, ReadMem], //=> visit_i64_atomic_load32_u
-            Operator::I32AtomicStore { memarg } => &[AtomicStuff, WriteMem], //=> visit_i32_atomic_store
-            Operator::I64AtomicStore { memarg } => &[AtomicStuff, WriteMem], //=> visit_i64_atomic_store
-            Operator::I32AtomicStore8 { memarg } => &[AtomicStuff, WriteMem], //=> visit_i32_atomic_store8
-            Operator::I32AtomicStore16 { memarg } => &[AtomicStuff, WriteMem], //=> visit_i32_atomic_store16
-            Operator::I64AtomicStore8 { memarg } => &[AtomicStuff, WriteMem], //=> visit_i64_atomic_store8
-            Operator::I64AtomicStore16 { memarg } => &[AtomicStuff, WriteMem], //=> visit_i64_atomic_store16
-            Operator::I64AtomicStore32 { memarg } => &[AtomicStuff, WriteMem], //=> visit_i64_atomic_store32
-            Operator::I32AtomicRmwAdd { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw_add
-            Operator::I64AtomicRmwAdd { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_add
-            Operator::I32AtomicRmw8AddU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw8_add_u
-            Operator::I32AtomicRmw16AddU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw16_add_u
-            Operator::I64AtomicRmw8AddU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw8_add_u
-            Operator::I64AtomicRmw16AddU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw16_add_u
-            Operator::I64AtomicRmw32AddU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw32_add_u
-            Operator::I32AtomicRmwSub { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw_sub
-            Operator::I64AtomicRmwSub { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_sub
-            Operator::I32AtomicRmw8SubU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw8_sub_u
-            Operator::I32AtomicRmw16SubU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw16_sub_u
-            Operator::I64AtomicRmw8SubU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw8_sub_u
-            Operator::I64AtomicRmw16SubU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw16_sub_u
-            Operator::I64AtomicRmw32SubU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw32_sub_u
-            Operator::I32AtomicRmwAnd { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw_and
-            Operator::I64AtomicRmwAnd { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_and
-            Operator::I32AtomicRmw8AndU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw8_and_u
-            Operator::I32AtomicRmw16AndU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw16_and_u
-            Operator::I64AtomicRmw8AndU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw8_and_u
-            Operator::I64AtomicRmw16AndU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw16_and_u
-            Operator::I64AtomicRmw32AndU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw32_and_u
-            Operator::I32AtomicRmwOr { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i32_atomic_rmw_or
-            Operator::I64AtomicRmwOr { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_or
-            Operator::I32AtomicRmw8OrU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw8_or_u
-            Operator::I32AtomicRmw16OrU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw16_or_u
-            Operator::I64AtomicRmw8OrU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw8_or_u
-            Operator::I64AtomicRmw16OrU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw16_or_u
-            Operator::I64AtomicRmw32OrU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw32_or_u
-            Operator::I32AtomicRmwXor { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw_xor
-            Operator::I64AtomicRmwXor { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_xor
-            Operator::I32AtomicRmw8XorU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw8_xor_u
-            Operator::I32AtomicRmw16XorU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw16_xor_u
-            Operator::I64AtomicRmw8XorU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw8_xor_u
-            Operator::I64AtomicRmw16XorU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw16_xor_u
-            Operator::I64AtomicRmw32XorU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw32_xor_u
-            Operator::I32AtomicRmwXchg { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw_xchg
-            Operator::I64AtomicRmwXchg { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_xchg
-            Operator::I32AtomicRmw8XchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i32_atomic_rmw8_xchg_u
-            Operator::I32AtomicRmw16XchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i32_atomic_rmw16_xchg_u
-            Operator::I64AtomicRmw8XchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i64_atomic_rmw8_xchg_u
-            Operator::I64AtomicRmw16XchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw16_xchg_u
-            Operator::I64AtomicRmw32XchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw32_xchg_u
-            Operator::I32AtomicRmwCmpxchg { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i32_atomic_rmw_cmpxchg
-            Operator::I64AtomicRmwCmpxchg { memarg } => &[AtomicStuff, WriteMem, ReadMem], //=> visit_i64_atomic_rmw_cmpxchg
-            Operator::I32AtomicRmw8CmpxchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i32_atomic_rmw8_cmpxchg_u
-            Operator::I32AtomicRmw16CmpxchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i32_atomic_rmw16_cmpxchg_u
-            Operator::I64AtomicRmw8CmpxchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i64_atomic_rmw8_cmpxchg_u
-            Operator::I64AtomicRmw16CmpxchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem], // => visit_i64_atomic_rmw16_cmpxchg_u
-            Operator::I64AtomicRmw32CmpxchgU { memarg } => &[AtomicStuff, WriteMem, ReadMem],
-            Operator::StructNew { sig } => &[],
-            Operator::StructGet { sig, idx } => &[ReadGlobal],
-            Operator::StructSet { sig, idx } => &[WriteGlobal], //=> visit_i64_atomic_rmw32_c
-            Operator::ArrayNew { sig } => &[],
-            Operator::ArrayNewFixed { sig, num } => &[],
-            Operator::ArrayGet { sig } => &[ReadGlobal],
-            Operator::ArraySet { sig } => &[WriteGlobal],
-            Operator::ArrayFill { sig } => &[WriteGlobal],
-            Operator::ArrayCopy { dest, src } => &[ReadGlobal, WriteGlobal],
-            Operator::ArrayLen => &[ReadGlobal],
-            Operator::RefTest { ty } => &[],
-            Operator::RefCast { ty } => &[Trap],
         }
     }
 
@@ -2453,9 +1658,7 @@ impl Operator {
     /// Is the operator a direct or indirect call?
     pub fn is_call(&self) -> bool {
         match self {
-            Operator::Call { .. } | Operator::CallIndirect { .. } | Operator::CallRef { .. } => {
-                true
-            }
+            Operator::Call { .. } | Operator::CallIndirect { .. } => true,
             _ => false,
         }
     }
@@ -2588,6 +1791,72 @@ impl Operator {
             | Operator::I64Store8 { memory }
             | Operator::I64Store16 { memory }
             | Operator::I64Store32 { memory }
+            | Operator::MemoryAtomicNotify { memory }
+            | Operator::MemoryAtomicWait32 { memory }
+            | Operator::MemoryAtomicWait64 { memory }
+            | Operator::I32AtomicLoad { memory }
+            | Operator::I64AtomicLoad { memory }
+            | Operator::I32AtomicLoad8U { memory }
+            | Operator::I32AtomicLoad16U { memory }
+            | Operator::I64AtomicLoad8U { memory }
+            | Operator::I64AtomicLoad16U { memory }
+            | Operator::I64AtomicLoad32U { memory }
+            | Operator::I32AtomicStore { memory }
+            | Operator::I64AtomicStore { memory }
+            | Operator::I32AtomicStore8 { memory }
+            | Operator::I32AtomicStore16 { memory }
+            | Operator::I64AtomicStore8 { memory }
+            | Operator::I64AtomicStore16 { memory }
+            | Operator::I64AtomicStore32 { memory }
+            | Operator::I32AtomicRmwAdd { memory }
+            | Operator::I64AtomicRmwAdd { memory }
+            | Operator::I32AtomicRmw8AddU { memory }
+            | Operator::I32AtomicRmw16AddU { memory }
+            | Operator::I64AtomicRmw8AddU { memory }
+            | Operator::I64AtomicRmw16AddU { memory }
+            | Operator::I64AtomicRmw32AddU { memory }
+            | Operator::I32AtomicRmwSub { memory }
+            | Operator::I64AtomicRmwSub { memory }
+            | Operator::I32AtomicRmw8SubU { memory }
+            | Operator::I32AtomicRmw16SubU { memory }
+            | Operator::I64AtomicRmw8SubU { memory }
+            | Operator::I64AtomicRmw16SubU { memory }
+            | Operator::I64AtomicRmw32SubU { memory }
+            | Operator::I32AtomicRmwAnd { memory }
+            | Operator::I64AtomicRmwAnd { memory }
+            | Operator::I32AtomicRmw8AndU { memory }
+            | Operator::I32AtomicRmw16AndU { memory }
+            | Operator::I64AtomicRmw8AndU { memory }
+            | Operator::I64AtomicRmw16AndU { memory }
+            | Operator::I64AtomicRmw32AndU { memory }
+            | Operator::I32AtomicRmwOr { memory }
+            | Operator::I64AtomicRmwOr { memory }
+            | Operator::I32AtomicRmw8OrU { memory }
+            | Operator::I32AtomicRmw16OrU { memory }
+            | Operator::I64AtomicRmw8OrU { memory }
+            | Operator::I64AtomicRmw16OrU { memory }
+            | Operator::I64AtomicRmw32OrU { memory }
+            | Operator::I32AtomicRmwXor { memory }
+            | Operator::I64AtomicRmwXor { memory }
+            | Operator::I32AtomicRmw8XorU { memory }
+            | Operator::I32AtomicRmw16XorU { memory }
+            | Operator::I64AtomicRmw8XorU { memory }
+            | Operator::I64AtomicRmw16XorU { memory }
+            | Operator::I64AtomicRmw32XorU { memory }
+            | Operator::I32AtomicRmwXchg { memory }
+            | Operator::I64AtomicRmwXchg { memory }
+            | Operator::I32AtomicRmw8XchgU { memory }
+            | Operator::I32AtomicRmw16XchgU { memory }
+            | Operator::I64AtomicRmw8XchgU { memory }
+            | Operator::I64AtomicRmw16XchgU { memory }
+            | Operator::I64AtomicRmw32XchgU { memory }
+            | Operator::I32AtomicRmwCmpxchg { memory }
+            | Operator::I64AtomicRmwCmpxchg { memory }
+            | Operator::I32AtomicRmw8CmpxchgU { memory }
+            | Operator::I32AtomicRmw16CmpxchgU { memory }
+            | Operator::I64AtomicRmw8CmpxchgU { memory }
+            | Operator::I64AtomicRmw16CmpxchgU { memory }
+            | Operator::I64AtomicRmw32CmpxchgU { memory }
             | Operator::V128Store { memory }
             | Operator::V128Store8Lane { memory, .. }
             | Operator::V128Store16Lane { memory, .. }
@@ -2603,8 +1872,8 @@ impl Operator {
     }
 }
 
-impl core::fmt::Display for Operator {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+impl std::fmt::Display for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             &Operator::Unreachable => write!(f, "unreachable")?,
             &Operator::Nop => write!(f, "nop")?,
@@ -2644,6 +1913,73 @@ impl core::fmt::Display for Operator {
             Operator::I64Store8 { memory } => write!(f, "i64store8<{}>", memory)?,
             Operator::I64Store16 { memory } => write!(f, "i64store16<{}>", memory)?,
             Operator::I64Store32 { memory } => write!(f, "i64store32<{}>", memory)?,
+            Operator::MemoryAtomicNotify { memory } => write!(f, "memory_atomic_notify<{}>", memory)?,
+            Operator::MemoryAtomicWait32 { memory } => write!(f, "memory_atomic_wait32<{}>", memory)?,
+            Operator::MemoryAtomicWait64 { memory } => write!(f, "memory_atomic_wait64<{}>", memory)?,
+            Operator::AtomicFence => write!(f, "atomic_fence")?,
+            Operator::I32AtomicLoad { memory } => write!(f, "i32atomic_load<{}>", memory)?,
+            Operator::I64AtomicLoad { memory } => write!(f, "i64atomic_load<{}>", memory)?,
+            Operator::I32AtomicLoad8U { memory } => write!(f, "i32atomic_load8_u<{}>", memory)?,
+            Operator::I32AtomicLoad16U { memory } => write!(f, "i32atomic_load16_u<{}>", memory)?,
+            Operator::I64AtomicLoad8U { memory } => write!(f, "i64atomic_load8_u<{}>", memory)?,
+            Operator::I64AtomicLoad16U { memory } => write!(f, "i64atomic_load16_u<{}>", memory)?,
+            Operator::I64AtomicLoad32U { memory } => write!(f, "i64atomic_load32_u<{}>", memory)?,
+            Operator::I32AtomicStore { memory } => write!(f, "i32atomic_store<{}>", memory)?,
+            Operator::I64AtomicStore { memory } => write!(f, "i64atomic_store<{}>", memory)?,
+            Operator::I32AtomicStore8 { memory } => write!(f, "i32atomic_store8<{}>", memory)?,
+            Operator::I32AtomicStore16 { memory } => write!(f, "i32atomic_store16<{}>", memory)?,
+            Operator::I64AtomicStore8 { memory } => write!(f, "i64atomic_store8<{}>", memory)?,
+            Operator::I64AtomicStore16 { memory } => write!(f, "i64atomic_store16<{}>", memory)?,
+            Operator::I64AtomicStore32 { memory } => write!(f, "i64atomic_store32<{}>", memory)?,
+            Operator::I32AtomicRmwAdd { memory } => write!(f, "i32atomic_rmw_add<{}>", memory)?,
+            Operator::I64AtomicRmwAdd { memory } => write!(f, "i64atomic_rmw_add<{}>", memory)?,
+            Operator::I32AtomicRmw8AddU { memory } => write!(f, "i32atomic_rmw8_add_u<{}>", memory)?,
+            Operator::I32AtomicRmw16AddU { memory } => write!(f, "i32atomic_rmw16_add_u<{}>", memory)?,
+            Operator::I64AtomicRmw8AddU { memory } => write!(f, "i64atomic_rmw8_add_u<{}>", memory)?,
+            Operator::I64AtomicRmw16AddU { memory } => write!(f, "i64atomic_rmw16_add_u<{}>", memory)?,
+            Operator::I64AtomicRmw32AddU { memory } => write!(f, "i64atomic_rmw32_add_u<{}>", memory)?,
+            Operator::I32AtomicRmwSub { memory } => write!(f, "i32atomic_rmw_sub<{}>", memory)?,
+            Operator::I64AtomicRmwSub { memory } => write!(f, "i64atomic_rmw_sub<{}>", memory)?,
+            Operator::I32AtomicRmw8SubU { memory } => write!(f, "i32atomic_rmw8_sub_u<{}>", memory)?,
+            Operator::I32AtomicRmw16SubU { memory } => write!(f, "i32atomic_rmw16_sub_u<{}>", memory)?,
+            Operator::I64AtomicRmw8SubU { memory } => write!(f, "i64atomic_rmw8_sub_u<{}>", memory)?,
+            Operator::I64AtomicRmw16SubU { memory } => write!(f, "i64atomic_rmw16_sub_u<{}>", memory)?,
+            Operator::I64AtomicRmw32SubU { memory } => write!(f, "i64atomic_rmw32_sub_u<{}>", memory)?,
+            Operator::I32AtomicRmwAnd { memory } => write!(f, "i32atomic_rmw_and<{}>", memory)?,
+            Operator::I64AtomicRmwAnd { memory } => write!(f, "i64atomic_rmw_and<{}>", memory)?,
+            Operator::I32AtomicRmw8AndU { memory } => write!(f, "i32atomic_rmw8_and_u<{}>", memory)?,
+            Operator::I32AtomicRmw16AndU { memory } => write!(f, "i32atomic_rmw16_and_u<{}>", memory)?,
+            Operator::I64AtomicRmw8AndU { memory } => write!(f, "i64atomic_rmw8_and_u<{}>", memory)?,
+            Operator::I64AtomicRmw16AndU { memory } => write!(f, "i64atomic_rmw16_and_u<{}>", memory)?,
+            Operator::I64AtomicRmw32AndU { memory } => write!(f, "i64atomic_rmw32_and_u<{}>", memory)?,
+            Operator::I32AtomicRmwOr { memory } => write!(f, "i32atomic_rmw_or<{}>", memory)?,
+            Operator::I64AtomicRmwOr { memory } => write!(f, "i64atomic_rmw_or<{}>", memory)?,
+            Operator::I32AtomicRmw8OrU { memory } => write!(f, "i32atomic_rmw8_or_u<{}>", memory)?,
+            Operator::I32AtomicRmw16OrU { memory } => write!(f, "i32atomic_rmw16_or_u<{}>", memory)?,
+            Operator::I64AtomicRmw8OrU { memory } => write!(f, "i64atomic_rmw8_or_u<{}>", memory)?,
+            Operator::I64AtomicRmw16OrU { memory } => write!(f, "i64atomic_rmw16_or_u<{}>", memory)?,
+            Operator::I64AtomicRmw32OrU { memory } => write!(f, "i64atomic_rmw32_or_u<{}>", memory)?,
+            Operator::I32AtomicRmwXor { memory } => write!(f, "i32atomic_rmw_xor<{}>", memory)?,
+            Operator::I64AtomicRmwXor { memory } => write!(f, "i64atomic_rmw_xor<{}>", memory)?,
+            Operator::I32AtomicRmw8XorU { memory } => write!(f, "i32atomic_rmw8_xor_u<{}>", memory)?,
+            Operator::I32AtomicRmw16XorU { memory } => write!(f, "i32atomic_rmw16_xor_u<{}>", memory)?,
+            Operator::I64AtomicRmw8XorU { memory } => write!(f, "i64atomic_rmw8_xor_u<{}>", memory)?,
+            Operator::I64AtomicRmw16XorU { memory } => write!(f, "i64atomic_rmw16_xor_u<{}>", memory)?,
+            Operator::I64AtomicRmw32XorU { memory } => write!(f, "i64atomic_rmw32_xor_u<{}>", memory)?,
+            Operator::I32AtomicRmwXchg { memory } => write!(f, "i32atomic_rmw_xchg<{}>", memory)?,
+            Operator::I64AtomicRmwXchg { memory } => write!(f, "i64atomic_rmw_xchg<{}>", memory)?,
+            Operator::I32AtomicRmw8XchgU { memory } => write!(f, "i32atomic_rmw8_xchg_u<{}>", memory)?,
+            Operator::I32AtomicRmw16XchgU { memory } => write!(f, "i32atomic_rmw16_xchg_u<{}>", memory)?,
+            Operator::I64AtomicRmw8XchgU { memory } => write!(f, "i64atomic_rmw8_xchg_u<{}>", memory)?,
+            Operator::I64AtomicRmw16XchgU { memory } => write!(f, "i64atomic_rmw16_xchg_u<{}>", memory)?,
+            Operator::I64AtomicRmw32XchgU { memory } => write!(f, "i64atomic_rmw32_xchg_u<{}>", memory)?,
+            Operator::I32AtomicRmwCmpxchg { memory } => write!(f, "i32atomic_rmw_cmpxchg<{}>", memory)?,
+            Operator::I64AtomicRmwCmpxchg { memory } => write!(f, "i64atomic_rmw_cmpxchg<{}>", memory)?,
+            Operator::I32AtomicRmw8CmpxchgU { memory } => write!(f, "i32atomic_rmw8_cmpxchg_u<{}>", memory)?,
+            Operator::I32AtomicRmw16CmpxchgU { memory } => write!(f, "i32atomic_rmw16_cmpxchg_u<{}>", memory)?,
+            Operator::I64AtomicRmw8CmpxchgU { memory } => write!(f, "i64atomic_rmw8_cmpxchg_u<{}>", memory)?,
+            Operator::I64AtomicRmw16CmpxchgU { memory } => write!(f, "i64atomic_rmw16_cmpxchg_u<{}>", memory)?,
+            Operator::I64AtomicRmw32CmpxchgU { memory } => write!(f, "i64atomic_rmw32_cmpxchg_u<{}>", memory)?,
 
             Operator::I32Const { value } => write!(f, "i32const<{}>", value)?,
             Operator::I64Const { value } => write!(f, "i64const<{}>", value)?,
@@ -3076,151 +2412,8 @@ impl core::fmt::Display for Operator {
 
             Operator::CallRef { sig_index } => write!(f, "call_ref<{}>", sig_index)?,
             Operator::RefIsNull => write!(f, "ref_is_null")?,
+            Operator::RefNull { sig_index } => write!(f, "ref_null<{}>", sig_index)?,
             Operator::RefFunc { func_index } => write!(f, "ref_func<{}>", func_index)?,
-            Operator::RefNull { ty } => write!(f, "ref_null<{}>", ty)?,
-
-            Operator::MemoryAtomicNotify { memarg } => write!(f, "memory_atomic_notify<{memarg}>")?, //=> visit_memory_atomic_notify
-            Operator::MemoryAtomicWait32 { memarg } => write!(f, "memory_atomic_wait32<{memarg}>")?, //=> visit_memory_atomic_wait32
-            Operator::MemoryAtomicWait64 { memarg } => write!(f, "memory_atomic_wait64<{memarg}>")?, //=> visit_memory_atomic_wait64
-            Operator::AtomicFence => write!(f, "atomic_fence")?, // => visit_atomic_fence
-            Operator::I32AtomicLoad { memarg } => write!(f, "i32atomic_load<{memarg}>")?, //=> visit_i32_atomic_load
-            Operator::I64AtomicLoad { memarg } => write!(f, "i64atomic_load<{memarg}>")?, //=> visit_i64_atomic_load
-            Operator::I32AtomicLoad8U { memarg } => write!(f, "i32atomic_load8u<{memarg}>")?, //=> visit_i32_atomic_load8_u
-            Operator::I32AtomicLoad16U { memarg } => write!(f, "i32atomic_load16u<{memarg}>")?, //=> visit_i32_atomic_load16_u
-            Operator::I64AtomicLoad8U { memarg } => write!(f, "i64atomic_load8u<{memarg}>")?, //=> visit_i64_atomic_load8_u
-            Operator::I64AtomicLoad16U { memarg } => write!(f, "i64atomic_load16u<{memarg}>")?, //=> visit_i64_atomic_load16_u
-            Operator::I64AtomicLoad32U { memarg } => write!(f, "i64atomic_load32u<{memarg}>")?, //=> visit_i64_atomic_load32_u
-            Operator::I32AtomicStore { memarg } => write!(f, "i32atomic_store<{memarg}>")?, //=> visit_i32_atomic_store
-            Operator::I64AtomicStore { memarg } => write!(f, "i64atomic_store<{memarg}>")?, //=> visit_i64_atomic_store
-            Operator::I32AtomicStore8 { memarg } => write!(f, "i32atomic_store8<{memarg}>")?, //=> visit_i32_atomic_store8
-            Operator::I32AtomicStore16 { memarg } => write!(f, "i32atomic_store16<{memarg}>")?, //=> visit_i32_atomic_store16
-            Operator::I64AtomicStore8 { memarg } => write!(f, "i64atomic_store8<{memarg}>")?, //=> visit_i64_atomic_store8
-            Operator::I64AtomicStore16 { memarg } => write!(f, "i64atomic_store16<{memarg}>")?, //=> visit_i64_atomic_store16
-            Operator::I64AtomicStore32 { memarg } => write!(f, "i64atomic_store32<{memarg}>")?, //=> visit_i64_atomic_store32
-            Operator::I32AtomicRmwAdd { memarg } => write!(f, "i32atomic_rmwAdd<{memarg}>")?, //=> visit_i32_atomic_rmw_add
-            Operator::I64AtomicRmwAdd { memarg } => write!(f, "i64atomic_rmwAdd<{memarg}>")?, //=> visit_i64_atomic_rmw_add
-            Operator::I32AtomicRmw8AddU { memarg } => write!(f, "i32atomic_rmw8Addu<{memarg}>")?, //=> visit_i32_atomic_rmw8_add_u
-            Operator::I32AtomicRmw16AddU { memarg } => write!(f, "i32atomic_rmw16Addu<{memarg}>")?, //=> visit_i32_atomic_rmw16_add_u
-            Operator::I64AtomicRmw8AddU { memarg } => write!(f, "i64atomic_rmw8Addu<{memarg}>")?, //=> visit_i64_atomic_rmw8_add_u
-            Operator::I64AtomicRmw16AddU { memarg } => write!(f, "i32atomic_rmw16Addu<{memarg}>")?, //=> visit_i64_atomic_rmw16_add_u
-            Operator::I64AtomicRmw32AddU { memarg } => write!(f, "i32atomic_rmw32Addu<{memarg}>")?, //=> visit_i64_atomic_rmw32_add_u
-            // Operator::I32AtomicRmwSub { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw_sub
-            // Operator::I64AtomicRmwSub { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw_sub
-            // Operator::I32AtomicRmw8SubU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw8_sub_u
-            // Operator::I32AtomicRmw16SubU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw16_sub_u
-            // Operator::I64AtomicRmw8SubU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw8_sub_u
-            // Operator::I64AtomicRmw16SubU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw16_sub_u
-            // Operator::I64AtomicRmw32SubU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw32_sub_u
-            Operator::I32AtomicRmwSub { memarg } => write!(f, "i32atomic_rmwSub<{memarg}>")?, //=> visit_i32_atomic_rmw_Sub
-            Operator::I64AtomicRmwSub { memarg } => write!(f, "i64atomic_rmwSub<{memarg}>")?, //=> visit_i64_atomic_rmw_Sub
-            Operator::I32AtomicRmw8SubU { memarg } => write!(f, "i32atomic_rmw8Subu<{memarg}>")?, //=> visit_i32_atomic_rmw8_Sub_u
-            Operator::I32AtomicRmw16SubU { memarg } => write!(f, "i32atomic_rmw16Subu<{memarg}>")?, //=> visit_i32_atomic_rmw16_Sub_u
-            Operator::I64AtomicRmw8SubU { memarg } => write!(f, "i64atomic_rmw8Subu<{memarg}>")?, //=> visit_i64_atomic_rmw8_Sub_u
-            Operator::I64AtomicRmw16SubU { memarg } => write!(f, "i32atomic_rmw16Subu<{memarg}>")?, //=> visit_i64_atomic_rmw16_Sub_u
-            Operator::I64AtomicRmw32SubU { memarg } => write!(f, "i32atomic_rmw32Subu<{memarg}>")?, //=> visit_i64_atomic_rmw32_Sub_u
-            // Operator::I32AtomicRmwAnd { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw_and
-            // Operator::I64AtomicRmwAnd { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw_and
-            // Operator::I32AtomicRmw8AndU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw8_and_u
-            // Operator::I32AtomicRmw16AndU { memarg }  => Some(memarg), //=> visit_i32_atomic_rmw16_and_u
-            // Operator::I64AtomicRmw8AndU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw8_and_u
-            // Operator::I64AtomicRmw16AndU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw16_and_u
-            // Operator::I64AtomicRmw32AndU { memarg }  => Some(memarg), //=> visit_i64_atomic_rmw32_and_u
-            Operator::I32AtomicRmwAnd { memarg } => write!(f, "i32atomic_rmwAnd<{memarg}>")?, //=> visit_i32_atomic_rmw_And
-            Operator::I64AtomicRmwAnd { memarg } => write!(f, "i64atomic_rmwAnd<{memarg}>")?, //=> visit_i64_atomic_rmw_And
-            Operator::I32AtomicRmw8AndU { memarg } => write!(f, "i32atomic_rmw8Andu<{memarg}>")?, //=> visit_i32_atomic_rmw8_And_u
-            Operator::I32AtomicRmw16AndU { memarg } => write!(f, "i32atomic_rmw16Andu<{memarg}>")?, //=> visit_i32_atomic_rmw16_And_u
-            Operator::I64AtomicRmw8AndU { memarg } => write!(f, "i64atomic_rmw8Andu<{memarg}>")?, //=> visit_i64_atomic_rmw8_And_u
-            Operator::I64AtomicRmw16AndU { memarg } => write!(f, "i32atomic_rmw16Andu<{memarg}>")?, //=> visit_i64_atomic_rmw16_And_u
-            Operator::I64AtomicRmw32AndU { memarg } => write!(f, "i32atomic_rmw32Andu<{memarg}>")?, //=> visit_i64_atomic_rmw32_And_u
-            // Operator::I32AtomicRmwOr { memarg }, // => visit_i32_atomic_rmw_or
-            // Operator::I64AtomicRmwOr { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_or
-            // Operator::I32AtomicRmw8OrU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw8_or_u
-            // Operator::I32AtomicRmw16OrU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw16_or_u
-            // Operator::I64AtomicRmw8OrU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw8_or_u
-            // Operator::I64AtomicRmw16OrU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw16_or_u
-            // Operator::I64AtomicRmw32OrU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_or_u
-            Operator::I32AtomicRmwOr { memarg } => write!(f, "i32atomic_rmwOr<{memarg}>")?, //=> visit_i32_atomic_rmw_Or
-            Operator::I64AtomicRmwOr { memarg } => write!(f, "i64atomic_rmwOr<{memarg}>")?, //=> visit_i64_atomic_rmw_Or
-            Operator::I32AtomicRmw8OrU { memarg } => write!(f, "i32atomic_rmw8Oru<{memarg}>")?, //=> visit_i32_atomic_rmw8_Or_u
-            Operator::I32AtomicRmw16OrU { memarg } => write!(f, "i32atomic_rmw16Oru<{memarg}>")?, //=> visit_i32_atomic_rmw16_Or_u
-            Operator::I64AtomicRmw8OrU { memarg } => write!(f, "i64atomic_rmw8Oru<{memarg}>")?, //=> visit_i64_atomic_rmw8_Or_u
-            Operator::I64AtomicRmw16OrU { memarg } => write!(f, "i32atomic_rmw16Oru<{memarg}>")?, //=> visit_i64_atomic_rmw16_Or_u
-            Operator::I64AtomicRmw32OrU { memarg } => write!(f, "i32atomic_rmw32Oru<{memarg}>")?, //=> visit_i64_atomic_rmw32_Or_u
-            // Operator::I32AtomicRmwXor { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw_xor
-            // Operator::I64AtomicRmwXor { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_xor
-            // Operator::I32AtomicRmw8XorU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw8_xor_u
-            // Operator::I32AtomicRmw16XorU { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw16_xor_u
-            // Operator::I64AtomicRmw8XorU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw8_xor_u
-            // Operator::I64AtomicRmw16XorU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw16_xor_u
-            // Operator::I64AtomicRmw32XorU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_xor_u
-            Operator::I32AtomicRmwXor { memarg } => write!(f, "i32atomic_rmwXor<{memarg}>")?, //=> visit_i32_atomic_rmw_Xor
-            Operator::I64AtomicRmwXor { memarg } => write!(f, "i64atomic_rmwXor<{memarg}>")?, //=> visit_i64_atomic_rmw_Xor
-            Operator::I32AtomicRmw8XorU { memarg } => write!(f, "i32atomic_rmw8Xoru<{memarg}>")?, //=> visit_i32_atomic_rmw8_Xor_u
-            Operator::I32AtomicRmw16XorU { memarg } => write!(f, "i32atomic_rmw16Xoru<{memarg}>")?, //=> visit_i32_atomic_rmw16_Xor_u
-            Operator::I64AtomicRmw8XorU { memarg } => write!(f, "i64atomic_rmw8Xoru<{memarg}>")?, //=> visit_i64_atomic_rmw8_Xor_u
-            Operator::I64AtomicRmw16XorU { memarg } => write!(f, "i32atomic_rmw16Xoru<{memarg}>")?, //=> visit_i64_atomic_rmw16_Xor_u
-            Operator::I64AtomicRmw32XorU { memarg } => write!(f, "i32atomic_rmw32Xoru<{memarg}>")?, //=> visit_i64_atomic_rmw32_Xor_u
-            // Operator::I32AtomicRmwXchg { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw_xchg
-            // Operator::I64AtomicRmwXchg { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_xchg
-            // Operator::I32AtomicRmw8XchgU { memarg },// => visit_i32_atomic_rmw8_xchg_u
-            // Operator::I32AtomicRmw16XchgU { memarg },// => visit_i32_atomic_rmw16_xchg_u
-            // Operator::I64AtomicRmw8XchgU { memarg },// => visit_i64_atomic_rmw8_xchg_u
-            // Operator::I64AtomicRmw16XchgU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw16_xchg_u
-            // Operator::I64AtomicRmw32XchgU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_xchg_u
-            Operator::I32AtomicRmwXchg { memarg } => write!(f, "i32atomic_rmwXchg<{memarg}>")?, //=> visit_i32_atomic_rmw_Xchg
-            Operator::I64AtomicRmwXchg { memarg } => write!(f, "i64atomic_rmwXchg<{memarg}>")?, //=> visit_i64_atomic_rmw_Xchg
-            Operator::I32AtomicRmw8XchgU { memarg } => write!(f, "i32atomic_rmw8Xchgu<{memarg}>")?, //=> visit_i32_atomic_rmw8_Xchg_u
-            Operator::I32AtomicRmw16XchgU { memarg } => {
-                write!(f, "i32atomic_rmw16Xchgu<{memarg}>")?
-            } //=> visit_i32_atomic_rmw16_Xchg_u
-            Operator::I64AtomicRmw8XchgU { memarg } => write!(f, "i64atomic_rmw8Xchgu<{memarg}>")?, //=> visit_i64_atomic_rmw8_Xchg_u
-            Operator::I64AtomicRmw16XchgU { memarg } => {
-                write!(f, "i32atomic_rmw16Xchgu<{memarg}>")?
-            } //=> visit_i64_atomic_rmw16_Xchg_u
-            Operator::I64AtomicRmw32XchgU { memarg } => {
-                write!(f, "i32atomic_rmw32Xchgu<{memarg}>")?
-            } //=> visit_i64_atomic_rmw32_Xchg_u
-            // Operator::I32AtomicRmwCmpxchg { memarg }  => Some(memarg),//=> visit_i32_atomic_rmw_cmpxchg
-            // Operator::I64AtomicRmwCmpxchg { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw_cmpxchg
-            // Operator::I32AtomicRmw8CmpxchgU { memarg },// => visit_i32_atomic_rmw8_cmpxchg_u
-            // Operator::I32AtomicRmw16CmpxchgU { memarg },// => visit_i32_atomic_rmw16_cmpxchg_u
-            // Operator::I64AtomicRmw8CmpxchgU { memarg },// => visit_i64_atomic_rmw8_cmpxchg_u
-            // Operator::I64AtomicRmw16CmpxchgU { memarg },// => visit_i64_atomic_rmw16_cmpxchg_u
-            // Operator::I64AtomicRmw32CmpxchgU { memarg }  => Some(memarg),//=> visit_i64_atomic_rmw32_c
-            Operator::I32AtomicRmwCmpxchg { memarg } => {
-                write!(f, "i32atomic_rmwCmpxchg<{memarg}>")?
-            } //=> visit_i32_atomic_rmw_Cmpxchg
-            Operator::I64AtomicRmwCmpxchg { memarg } => {
-                write!(f, "i64atomic_rmwCmpxchg<{memarg}>")?
-            } //=> visit_i64_atomic_rmw_Cmpxchg
-            Operator::I32AtomicRmw8CmpxchgU { memarg } => {
-                write!(f, "i32atomic_rmw8Cmpxchgu<{memarg}>")?
-            } //=> visit_i32_atomic_rmw8_Cmpxchg_u
-            Operator::I32AtomicRmw16CmpxchgU { memarg } => {
-                write!(f, "i32atomic_rmw16Cmpxchgu<{memarg}>")?
-            } //=> visit_i32_atomic_rmw16_Cmpxchg_u
-            Operator::I64AtomicRmw8CmpxchgU { memarg } => {
-                write!(f, "i64atomic_rmw8Cmpxchgu<{memarg}>")?
-            } //=> visit_i64_atomic_rmw8_Cmpxchg_u
-            Operator::I64AtomicRmw16CmpxchgU { memarg } => {
-                write!(f, "i32atomic_rmw16Cmpxchgu<{memarg}>")?
-            } //=> visit_i64_atomic_rmw16_Cmpxchg_u
-            Operator::I64AtomicRmw32CmpxchgU { memarg } => {
-                write!(f, "i32atomic_rmw32Cmpxchgu<{memarg}>")?
-            } //=> visit_i64_atomic_rmw32_Cmpxchg_u
-
-            Operator::StructNew { sig } => write!(f, "struct_new<{sig}>")?,
-            Operator::StructGet { sig, idx } => write!(f, "struct_get<{sig}@{idx}>")?,
-            Operator::StructSet { sig, idx } => write!(f, "struct_set<{sig}@{idx}>")?,
-            Operator::ArrayNew { sig } => write!(f, "array_new<{sig}>")?,
-            Operator::ArrayNewFixed { sig, num } => write!(f, "array_new_fixed<{sig};{num}>")?,
-            Operator::ArrayGet { sig } => write!(f, "array_get<{sig}>")?,
-            Operator::ArraySet { sig } => write!(f, "array_set<{sig}>")?,
-            Operator::ArrayFill { sig } => write!(f, "array_fill<{sig}>")?,
-            Operator::ArrayCopy { dest, src } => write!(f, "array_copy<{dest}-{src}>")?,
-            Operator::ArrayLen => write!(f, "array_len")?,
-            Operator::RefTest { ty } => write!(f, "ref_test<{ty}>")?,
-            Operator::RefCast { ty } => write!(f, "ref_cast<{ty}>")?,
         }
 
         Ok(())
@@ -3239,312 +2432,5 @@ pub(crate) fn op_rematerialize(op: &Operator) -> bool {
         | &Operator::F32Const { .. }
         | &Operator::F64Const { .. } => true,
         _ => false,
-    }
-}
-
-pub fn rewrite_mem<V, E>(
-    o: &mut Operator,
-    v: &mut [V],
-    mut go: impl FnMut(&mut crate::Memory, Option<&mut V>) -> Result<(), E>,
-) -> Result<(), E> {
-    match o {
-        Operator::I32Load { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::F32Load { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::F64Load { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Load8S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Load8U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Load16S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Load16U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load8S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load8U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load16S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load16U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load32S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Load32U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Store { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Store { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::F32Store { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::F64Store { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Store8 { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I32Store16 { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Store8 { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Store16 { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::I64Store32 { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::MemorySize { mem } => go(mem, None),
-        Operator::MemoryGrow { mem } => go(mem, None),
-        Operator::MemoryCopy { dst_mem, src_mem } => {
-            go(dst_mem, Some(&mut v[0]))?;
-            go(src_mem, Some(&mut v[1]))?;
-            Ok(())
-        }
-        Operator::MemoryFill { mem } => go(mem, Some(&mut v[0])),
-
-        Operator::V128Load { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load8x8S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load8x8U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load16x4S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load16x4U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load32x2S { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load32x2U { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load8Splat { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load16Splat { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load32Splat { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load64Splat { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load32Zero { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load64Zero { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Store { memory } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load8Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load16Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load32Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Load64Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Store8Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Store16Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Store32Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-        Operator::V128Store64Lane { memory, .. } => go(&mut memory.memory, Some(&mut v[0])),
-
-        Operator::MemoryAtomicNotify { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_memory_atomic_notify
-        Operator::MemoryAtomicWait32 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_memory_atomic_wait32
-        Operator::MemoryAtomicWait64 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_memory_atomic_wait64
-        Operator::I32AtomicLoad { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_load
-        Operator::I64AtomicLoad { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_load
-        Operator::I32AtomicLoad8U { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_load8_u
-        Operator::I32AtomicLoad16U { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_load16_u
-        Operator::I64AtomicLoad8U { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_load8_u
-        Operator::I64AtomicLoad16U { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_load16_u
-        Operator::I64AtomicLoad32U { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_load32_u
-        Operator::I32AtomicStore { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_store
-        Operator::I64AtomicStore { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_store
-        Operator::I32AtomicStore8 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_store8
-        Operator::I32AtomicStore16 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_store16
-        Operator::I64AtomicStore8 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_store8
-        Operator::I64AtomicStore16 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_store16
-        Operator::I64AtomicStore32 { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_store32
-        Operator::I32AtomicRmwAdd { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw_add
-        Operator::I64AtomicRmwAdd { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_add
-        Operator::I32AtomicRmw8AddU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw8_add_u
-        Operator::I32AtomicRmw16AddU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw16_add_u
-        Operator::I64AtomicRmw8AddU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw8_add_u
-        Operator::I64AtomicRmw16AddU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw16_add_u
-        Operator::I64AtomicRmw32AddU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_add_u
-        Operator::I32AtomicRmwSub { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw_sub
-        Operator::I64AtomicRmwSub { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_sub
-        Operator::I32AtomicRmw8SubU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw8_sub_u
-        Operator::I32AtomicRmw16SubU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw16_sub_u
-        Operator::I64AtomicRmw8SubU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw8_sub_u
-        Operator::I64AtomicRmw16SubU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw16_sub_u
-        Operator::I64AtomicRmw32SubU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_sub_u
-        Operator::I32AtomicRmwAnd { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw_and
-        Operator::I64AtomicRmwAnd { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_and
-        Operator::I32AtomicRmw8AndU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw8_and_u
-        Operator::I32AtomicRmw16AndU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw16_and_u
-        Operator::I64AtomicRmw8AndU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw8_and_u
-        Operator::I64AtomicRmw16AndU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw16_and_u
-        Operator::I64AtomicRmw32AndU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_and_u
-        Operator::I32AtomicRmwOr { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i32_atomic_rmw_or
-        Operator::I64AtomicRmwOr { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_or
-        Operator::I32AtomicRmw8OrU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw8_or_u
-        Operator::I32AtomicRmw16OrU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw16_or_u
-        Operator::I64AtomicRmw8OrU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw8_or_u
-        Operator::I64AtomicRmw16OrU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw16_or_u
-        Operator::I64AtomicRmw32OrU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_or_u
-        Operator::I32AtomicRmwXor { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw_xor
-        Operator::I64AtomicRmwXor { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_xor
-        Operator::I32AtomicRmw8XorU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw8_xor_u
-        Operator::I32AtomicRmw16XorU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw16_xor_u
-        Operator::I64AtomicRmw8XorU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw8_xor_u
-        Operator::I64AtomicRmw16XorU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw16_xor_u
-        Operator::I64AtomicRmw32XorU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_xor_u
-        Operator::I32AtomicRmwXchg { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw_xchg
-        Operator::I64AtomicRmwXchg { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_xchg
-        Operator::I32AtomicRmw8XchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i32_atomic_rmw8_xchg_u
-        Operator::I32AtomicRmw16XchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i32_atomic_rmw16_xchg_u
-        Operator::I64AtomicRmw8XchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i64_atomic_rmw8_xchg_u
-        Operator::I64AtomicRmw16XchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw16_xchg_u
-        Operator::I64AtomicRmw32XchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_xchg_u
-        Operator::I32AtomicRmwCmpxchg { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i32_atomic_rmw_cmpxchg
-        Operator::I64AtomicRmwCmpxchg { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw_cmpxchg
-        Operator::I32AtomicRmw8CmpxchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i32_atomic_rmw8_cmpxchg_u
-        Operator::I32AtomicRmw16CmpxchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i32_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw8CmpxchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i64_atomic_rmw8_cmpxchg_u
-        Operator::I64AtomicRmw16CmpxchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), // => visit_i64_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw32CmpxchgU { memarg } => go(&mut memarg.memory, Some(&mut v[0])), //=> visit_i64_atomic_rmw32_c
-        _ => Ok(()),
-    }
-}
-pub fn mem_count(o: &Operator) -> usize {
-    match o {
-        Operator::I32Load { memory } => 1,
-        Operator::I64Load { memory } => 1,
-        Operator::F32Load { memory } => 1,
-        Operator::F64Load { memory } => 1,
-        Operator::I32Load8S { memory } => 1,
-        Operator::I32Load8U { memory } => 1,
-        Operator::I32Load16S { memory } => 1,
-        Operator::I32Load16U { memory } => 1,
-        Operator::I64Load8S { memory } => 1,
-        Operator::I64Load8U { memory } => 1,
-        Operator::I64Load16S { memory } => 1,
-        Operator::I64Load16U { memory } => 1,
-        Operator::I64Load32S { memory } => 1,
-        Operator::I64Load32U { memory } => 1,
-        Operator::I32Store { memory } => 1,
-        Operator::I64Store { memory } => 1,
-        Operator::F32Store { memory } => 1,
-        Operator::F64Store { memory } => 1,
-        Operator::I32Store8 { memory } => 1,
-        Operator::I32Store16 { memory } => 1,
-        Operator::I64Store8 { memory } => 1,
-        Operator::I64Store16 { memory } => 1,
-        Operator::I64Store32 { memory } => 1,
-        Operator::MemorySize { mem } => 1,
-        Operator::MemoryGrow { mem } => 1,
-        Operator::MemoryCopy { dst_mem, src_mem } => 2,
-        Operator::MemoryFill { mem } => 1,
-
-        Operator::V128Load { memory } => 1,
-        Operator::V128Load8x8S { memory } => 1,
-        Operator::V128Load8x8U { memory } => 1,
-        Operator::V128Load16x4S { memory } => 1,
-        Operator::V128Load16x4U { memory } => 1,
-        Operator::V128Load32x2S { memory } => 1,
-        Operator::V128Load32x2U { memory } => 1,
-        Operator::V128Load8Splat { memory } => 1,
-        Operator::V128Load16Splat { memory } => 1,
-        Operator::V128Load32Splat { memory } => 1,
-        Operator::V128Load64Splat { memory } => 1,
-        Operator::V128Load32Zero { memory } => 1,
-        Operator::V128Load64Zero { memory } => 1,
-        Operator::V128Store { memory } => 1,
-        Operator::V128Load8Lane { memory, .. } => 1,
-        Operator::V128Load16Lane { memory, .. } => 1,
-        Operator::V128Load32Lane { memory, .. } => 1,
-        Operator::V128Load64Lane { memory, .. } => 1,
-        Operator::V128Store8Lane { memory, .. } => 1,
-        Operator::V128Store16Lane { memory, .. } => 1,
-        Operator::V128Store32Lane { memory, .. } => 1,
-        Operator::V128Store64Lane { memory, .. } => 1,
-        _ => match memory_arg(o) {
-            None => 0,
-            Some(_) => 1,
-        },
-    }
-}
-pub fn memory_arg(o: &Operator) -> Option<&MemoryArg> {
-    match o {
-        Operator::I32Load { memory } => Some(memory),
-        Operator::I64Load { memory } => Some(memory),
-        Operator::F32Load { memory } => Some(memory),
-        Operator::F64Load { memory } => Some(memory),
-        Operator::I32Load8S { memory } => Some(memory),
-        Operator::I32Load8U { memory } => Some(memory),
-        Operator::I32Load16S { memory } => Some(memory),
-        Operator::I32Load16U { memory } => Some(memory),
-        Operator::I64Load8S { memory } => Some(memory),
-        Operator::I64Load8U { memory } => Some(memory),
-        Operator::I64Load16S { memory } => Some(memory),
-        Operator::I64Load16U { memory } => Some(memory),
-        Operator::I64Load32S { memory } => Some(memory),
-        Operator::I64Load32U { memory } => Some(memory),
-        Operator::I32Store { memory } => Some(memory),
-        Operator::I64Store { memory } => Some(memory),
-        Operator::F32Store { memory } => Some(memory),
-        Operator::F64Store { memory } => Some(memory),
-        Operator::I32Store8 { memory } => Some(memory),
-        Operator::I32Store16 { memory } => Some(memory),
-        Operator::I64Store8 { memory } => Some(memory),
-        Operator::I64Store16 { memory } => Some(memory),
-        Operator::I64Store32 { memory } => Some(memory),
-
-        Operator::V128Load { memory } => Some(memory),
-        Operator::V128Load8x8S { memory } => Some(memory),
-        Operator::V128Load8x8U { memory } => Some(memory),
-        Operator::V128Load16x4S { memory } => Some(memory),
-        Operator::V128Load16x4U { memory } => Some(memory),
-        Operator::V128Load32x2S { memory } => Some(memory),
-        Operator::V128Load32x2U { memory } => Some(memory),
-        Operator::V128Load8Splat { memory } => Some(memory),
-        Operator::V128Load16Splat { memory } => Some(memory),
-        Operator::V128Load32Splat { memory } => Some(memory),
-        Operator::V128Load64Splat { memory } => Some(memory),
-        Operator::V128Load32Zero { memory } => Some(memory),
-        Operator::V128Load64Zero { memory } => Some(memory),
-        Operator::V128Store { memory } => Some(memory),
-        Operator::V128Load8Lane { memory, .. } => Some(memory),
-        Operator::V128Load16Lane { memory, .. } => Some(memory),
-        Operator::V128Load32Lane { memory, .. } => Some(memory),
-        Operator::V128Load64Lane { memory, .. } => Some(memory),
-        Operator::V128Store8Lane { memory, .. } => Some(memory),
-        Operator::V128Store16Lane { memory, .. } => Some(memory),
-        Operator::V128Store32Lane { memory, .. } => Some(memory),
-        Operator::V128Store64Lane { memory, .. } => Some(memory),
-        Operator::MemoryAtomicNotify { memarg } => Some(memarg), //=> visit_memory_atomic_notify
-        Operator::MemoryAtomicWait32 { memarg } => Some(memarg), //=> visit_memory_atomic_wait32
-        Operator::MemoryAtomicWait64 { memarg } => Some(memarg), //=> visit_memory_atomic_wait64
-        Operator::I32AtomicLoad { memarg } => Some(memarg),      //=> visit_i32_atomic_load
-        Operator::I64AtomicLoad { memarg } => Some(memarg),      //=> visit_i64_atomic_load
-        Operator::I32AtomicLoad8U { memarg } => Some(memarg),    //=> visit_i32_atomic_load8_u
-        Operator::I32AtomicLoad16U { memarg } => Some(memarg),   //=> visit_i32_atomic_load16_u
-        Operator::I64AtomicLoad8U { memarg } => Some(memarg),    //=> visit_i64_atomic_load8_u
-        Operator::I64AtomicLoad16U { memarg } => Some(memarg),   //=> visit_i64_atomic_load16_u
-        Operator::I64AtomicLoad32U { memarg } => Some(memarg),   //=> visit_i64_atomic_load32_u
-        Operator::I32AtomicStore { memarg } => Some(memarg),     //=> visit_i32_atomic_store
-        Operator::I64AtomicStore { memarg } => Some(memarg),     //=> visit_i64_atomic_store
-        Operator::I32AtomicStore8 { memarg } => Some(memarg),    //=> visit_i32_atomic_store8
-        Operator::I32AtomicStore16 { memarg } => Some(memarg),   //=> visit_i32_atomic_store16
-        Operator::I64AtomicStore8 { memarg } => Some(memarg),    //=> visit_i64_atomic_store8
-        Operator::I64AtomicStore16 { memarg } => Some(memarg),   //=> visit_i64_atomic_store16
-        Operator::I64AtomicStore32 { memarg } => Some(memarg),   //=> visit_i64_atomic_store32
-        Operator::I32AtomicRmwAdd { memarg } => Some(memarg),    //=> visit_i32_atomic_rmw_add
-        Operator::I64AtomicRmwAdd { memarg } => Some(memarg),    //=> visit_i64_atomic_rmw_add
-        Operator::I32AtomicRmw8AddU { memarg } => Some(memarg),  //=> visit_i32_atomic_rmw8_add_u
-        Operator::I32AtomicRmw16AddU { memarg } => Some(memarg), //=> visit_i32_atomic_rmw16_add_u
-        Operator::I64AtomicRmw8AddU { memarg } => Some(memarg),  //=> visit_i64_atomic_rmw8_add_u
-        Operator::I64AtomicRmw16AddU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw16_add_u
-        Operator::I64AtomicRmw32AddU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw32_add_u
-        Operator::I32AtomicRmwSub { memarg } => Some(memarg),    //=> visit_i32_atomic_rmw_sub
-        Operator::I64AtomicRmwSub { memarg } => Some(memarg),    //=> visit_i64_atomic_rmw_sub
-        Operator::I32AtomicRmw8SubU { memarg } => Some(memarg),  //=> visit_i32_atomic_rmw8_sub_u
-        Operator::I32AtomicRmw16SubU { memarg } => Some(memarg), //=> visit_i32_atomic_rmw16_sub_u
-        Operator::I64AtomicRmw8SubU { memarg } => Some(memarg),  //=> visit_i64_atomic_rmw8_sub_u
-        Operator::I64AtomicRmw16SubU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw16_sub_u
-        Operator::I64AtomicRmw32SubU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw32_sub_u
-        Operator::I32AtomicRmwAnd { memarg } => Some(memarg),    //=> visit_i32_atomic_rmw_and
-        Operator::I64AtomicRmwAnd { memarg } => Some(memarg),    //=> visit_i64_atomic_rmw_and
-        Operator::I32AtomicRmw8AndU { memarg } => Some(memarg),  //=> visit_i32_atomic_rmw8_and_u
-        Operator::I32AtomicRmw16AndU { memarg } => Some(memarg), //=> visit_i32_atomic_rmw16_and_u
-        Operator::I64AtomicRmw8AndU { memarg } => Some(memarg),  //=> visit_i64_atomic_rmw8_and_u
-        Operator::I64AtomicRmw16AndU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw16_and_u
-        Operator::I64AtomicRmw32AndU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw32_and_u
-        Operator::I32AtomicRmwOr { memarg } => Some(memarg),     // => visit_i32_atomic_rmw_or
-        Operator::I64AtomicRmwOr { memarg } => Some(memarg),     //=> visit_i64_atomic_rmw_or
-        Operator::I32AtomicRmw8OrU { memarg } => Some(memarg),   //=> visit_i32_atomic_rmw8_or_u
-        Operator::I32AtomicRmw16OrU { memarg } => Some(memarg),  //=> visit_i32_atomic_rmw16_or_u
-        Operator::I64AtomicRmw8OrU { memarg } => Some(memarg),   //=> visit_i64_atomic_rmw8_or_u
-        Operator::I64AtomicRmw16OrU { memarg } => Some(memarg),  //=> visit_i64_atomic_rmw16_or_u
-        Operator::I64AtomicRmw32OrU { memarg } => Some(memarg),  //=> visit_i64_atomic_rmw32_or_u
-        Operator::I32AtomicRmwXor { memarg } => Some(memarg),    //=> visit_i32_atomic_rmw_xor
-        Operator::I64AtomicRmwXor { memarg } => Some(memarg),    //=> visit_i64_atomic_rmw_xor
-        Operator::I32AtomicRmw8XorU { memarg } => Some(memarg),  //=> visit_i32_atomic_rmw8_xor_u
-        Operator::I32AtomicRmw16XorU { memarg } => Some(memarg), //=> visit_i32_atomic_rmw16_xor_u
-        Operator::I64AtomicRmw8XorU { memarg } => Some(memarg),  //=> visit_i64_atomic_rmw8_xor_u
-        Operator::I64AtomicRmw16XorU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw16_xor_u
-        Operator::I64AtomicRmw32XorU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw32_xor_u
-        Operator::I32AtomicRmwXchg { memarg } => Some(memarg),   //=> visit_i32_atomic_rmw_xchg
-        Operator::I64AtomicRmwXchg { memarg } => Some(memarg),   //=> visit_i64_atomic_rmw_xchg
-        Operator::I32AtomicRmw8XchgU { memarg } => Some(memarg), // => visit_i32_atomic_rmw8_xchg_u
-        Operator::I32AtomicRmw16XchgU { memarg } => Some(memarg), // => visit_i32_atomic_rmw16_xchg_u
-        Operator::I64AtomicRmw8XchgU { memarg } => Some(memarg),  // => visit_i64_atomic_rmw8_xchg_u
-        Operator::I64AtomicRmw16XchgU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw16_xchg_u
-        Operator::I64AtomicRmw32XchgU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw32_xchg_u
-        Operator::I32AtomicRmwCmpxchg { memarg } => Some(memarg), //=> visit_i32_atomic_rmw_cmpxchg
-        Operator::I64AtomicRmwCmpxchg { memarg } => Some(memarg), //=> visit_i64_atomic_rmw_cmpxchg
-        Operator::I32AtomicRmw8CmpxchgU { memarg } => Some(memarg), // => visit_i32_atomic_rmw8_cmpxchg_u
-        Operator::I32AtomicRmw16CmpxchgU { memarg } => Some(memarg), // => visit_i32_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw8CmpxchgU { memarg } => Some(memarg), // => visit_i64_atomic_rmw8_cmpxchg_u
-        Operator::I64AtomicRmw16CmpxchgU { memarg } => Some(memarg), // => visit_i64_atomic_rmw16_cmpxchg_u
-        Operator::I64AtomicRmw32CmpxchgU { memarg } => Some(memarg), //=> visit_i64_atomic_rmw32_c
-
-        _ => None,
     }
 }

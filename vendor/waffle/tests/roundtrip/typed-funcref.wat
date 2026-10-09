@@ -7,7 +7,7 @@
   (elem (table $tab2) (i32.const 0) (ref null $t) (ref.func $f))
 
   (func $callit (param i32 i32 i32) (result i32)
-        (return_call_ref $t (local.get 1)
+        (call_ref $t (local.get 1)
                      (local.get 2)
                      (table.get $tab (local.get 0))))
 

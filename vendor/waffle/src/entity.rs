@@ -1,15 +1,10 @@
 //! Type-safe indices and indexed containers.
 
-use core::default::Default;
-use core::fmt::Debug;
-use core::hash::Hash;
-use core::marker::PhantomData;
-use core::ops::{Index, IndexMut};
-
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
-use arena_traits::{Arena, IndexAlloc, IndexIter};
+use std::default::Default;
+use std::fmt::Debug;
+use std::hash::Hash;
+use std::marker::PhantomData;
+use std::ops::{Index, IndexMut};
 
 /// An index into an index-space of entities.
 pub trait EntityRef: Clone + Copy + PartialEq + Eq + PartialOrd + Ord + Hash {
@@ -42,14 +37,12 @@ pub trait EntityRef: Clone + Copy + PartialEq + Eq + PartialOrd + Ord + Hash {
 #[macro_export]
 macro_rules! declare_entity {
     ($name:tt, $prefix:tt) => {
-        #[derive(
-            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-        )]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(u32);
 
         impl $crate::entity::EntityRef for $name {
             fn new(value: usize) -> Self {
-                use core::convert::TryFrom;
+                use std::convert::TryFrom;
                 let value = u32::try_from(value).unwrap();
                 debug_assert!(value != u32::MAX);
                 Self(value)
@@ -63,35 +56,37 @@ macro_rules! declare_entity {
             }
         }
 
-        impl core::convert::From<u32> for $name {
+        impl std::convert::From<u32> for $name {
             fn from(val: u32) -> Self {
                 <Self as $crate::entity::EntityRef>::new(val as usize)
             }
         }
 
-        impl core::default::Default for $name {
+        impl std::default::Default for $name {
             fn default() -> Self {
                 <Self as $crate::entity::EntityRef>::invalid()
             }
         }
 
-        impl core::fmt::Debug for $name {
-            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "{}{}", $prefix, self.0)
             }
         }
-        impl core::fmt::Display for $name {
-            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "{}{}", $prefix, self.0)
             }
         }
     };
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A vector that *defines* an entity index space, holding the data
+/// for each entity.
+#[derive(Clone, Debug)]
 pub struct EntityVec<Idx: EntityRef, T: Clone + Debug>(Vec<T>, PhantomData<Idx>);
 
-impl<Idx: EntityRef, T: Clone + Debug> core::default::Default for EntityVec<Idx, T> {
+impl<Idx: EntityRef, T: Clone + Debug> std::default::Default for EntityVec<Idx, T> {
     fn default() -> Self {
         Self(vec![], PhantomData)
     }
@@ -179,24 +174,12 @@ impl<Idx: EntityRef, T: Clone + Debug> IndexMut<Idx> for EntityVec<Idx, T> {
     }
 }
 
-impl<Idx: EntityRef, T: Clone + Debug> IndexAlloc<Idx> for EntityVec<Idx, T> {
-    fn alloc(&mut self, a: Self::Output) -> Idx {
-        self.push(a)
-    }
-}
-impl<Idx: EntityRef, T: Clone + Debug> IndexIter<Idx> for EntityVec<Idx, T> {
-    fn iter(&self) -> Box<dyn Iterator<Item = Idx> + '_> {
-        Box::new(self.iter())
-    }
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 /// Vector of state per entity in an index-space that does *not*
 /// define the index-space. In other words, this container will not
 /// pass out new indices, it will only allow associating state with
 /// existing indices; and it requires a default value for data at an
 /// index not yet assigned.
-
+#[derive(Clone, Debug, Default)]
 pub struct PerEntity<Idx: EntityRef, T: Clone + Debug + Default>(Vec<T>, PhantomData<Idx>, T);
 
 impl<Idx: EntityRef, T: Clone + Debug + Default> Index<Idx> for PerEntity<Idx, T> {

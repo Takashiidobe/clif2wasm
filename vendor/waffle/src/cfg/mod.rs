@@ -6,9 +6,6 @@
 use crate::declare_entity;
 use crate::entity::{EntityRef, EntityVec, PerEntity};
 use crate::ir::{Block, FunctionBody, Terminator, Value, ValueDef};
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 pub mod domtree;
@@ -100,8 +97,8 @@ impl CFGInfo {
             for &(_, param) in &block_def.params {
                 def_block[param] = block;
             }
-            for value in &block_def.insts {
-                def_block[value.value] = block;
+            for &value in &block_def.insts {
+                def_block[value] = block;
             }
         }
         for value in f.values.iter() {

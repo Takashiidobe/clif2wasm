@@ -179,12 +179,7 @@ fn write_object(rel: &Relocatable) -> Result<Vec<u8>> {
     let mut p = Vec::new();
     uleb(&mut p, rel.signatures.len() as u64);
     for sd in &rel.signatures {
-        let SignatureData::Func {
-            params, returns, ..
-        } = sd
-        else {
-            bail!("non-function type in object module signatures: {sd:?}");
-        };
+        let SignatureData { params, returns } = sd;
         p.push(0x60);
         uleb(&mut p, params.len() as u64);
         for &t in params {

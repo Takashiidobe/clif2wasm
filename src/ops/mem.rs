@@ -41,7 +41,7 @@ pub(super) fn mem_arg_at(cx: &FnCx, off: i32) -> Result<MemoryArg> {
     Ok(MemoryArg {
         // Byte-alignment hint: always correct, never a trap; tuning comes later.
         align: 0,
-        offset: off as u64,
+        offset: off as u32,
         memory: cx.m.mem0,
     })
 }

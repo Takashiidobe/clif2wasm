@@ -1,5 +1,5 @@
 //! Error types.
-use alloc::string::String;
+
 /// An error that occurs when translating Wasm to IR.
 #[derive(Clone, Debug)]
 pub enum FrontendError {
@@ -12,10 +12,10 @@ pub enum FrontendError {
     Internal(String),
 }
 
-impl core::fmt::Display for FrontendError {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        core::fmt::Debug::fmt(self, f)
+impl std::fmt::Display for FrontendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
     }
 }
 
-impl core::error::Error for FrontendError {}
+impl std::error::Error for FrontendError {}

@@ -1,6 +1,6 @@
 use super::{
-    Block, ControlTag, FunctionBodyDisplay, Handler, Local, Module, Signature, SignatureData, Type,
-    Value, ValueDef,
+    Block, FunctionBodyDisplay, Func, Local, Module, NOPPrintDecorator, PrintDecorator, Signature,
+    Table, Type, Value, ValueDef,
 };
 use crate::backend::WasmFuncBackend;
 use crate::cfg::CFGInfo;
@@ -9,29 +9,22 @@ use crate::frontend::parse_body;
 use crate::ir::SourceLoc;
 use crate::passes::basic_opt::OptOptions;
 use crate::pool::{ListPool, ListRef};
-use crate::{Func, Operator, Table};
-use alloc::borrow::ToOwned;
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::Operator;
 use anyhow::Result;
-use core::iter::{empty, once};
-use either::Either;
-use hashbrown::HashMap as FxHashMap;
-use hashbrown::HashSet;
-// use ssa_traits::{Term, Val};
+use fxhash::FxHashMap;
+use fxhash::FxHashSet as HashSet;
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+/// A declaration of a function: there is one `FuncDecl` per `Func`
+/// index.
 ///
 /// `FuncDecl` represents the various forms in which we can hold a
 /// function body: not yet parsed, parsed into full IR, recompiled
 /// into new bytecode, or an import (none of the above).
-
+#[derive(Clone, Debug, Default)]
 pub enum FuncDecl<'a> {
     /// An imported function.
     Import(Signature, String),
     /// An un-expanded body that can be lazily expanded if needed.
-    #[serde(skip)]
     Lazy(Signature, String, wasmparser::FunctionBody<'a>),
     /// A modified or new function body that requires compilation.
     Body(Signature, String, FunctionBody),
@@ -151,9 +144,9 @@ impl<'a> FuncDecl<'a> {
     }
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 /// The body of a function, as an SSA-based intermediate
 /// representation.
+#[derive(Clone, Debug, Default)]
 pub struct FunctionBody {
     /// How many parameters the function has. (Their types are the
     /// first `n_params` values in `locals`.)
@@ -180,8 +173,6 @@ pub struct FunctionBody {
     pub value_locals: PerEntity<Value, Option<Local>>,
     /// Debug source locations of each value.
     pub source_locs: PerEntity<Value, SourceLoc>,
-    ///Is this function shared
-    pub shared: bool,
 }
 
 impl FunctionBody {
@@ -190,17 +181,9 @@ impl FunctionBody {
     /// the function parameters in the signature, but no
     /// contents. `module` is necessary to look up the signature.
     pub fn new(module: &Module, sig: Signature) -> FunctionBody {
-        let SignatureData::Func {
-            params,
-            returns,
-            shared,
-        } = &module.signatures[sig]
-        else {
-            todo!()
-        };
-        let locals = EntityVec::from(params.clone());
+        let locals = EntityVec::from(module.signatures[sig].params.clone());
         let n_params = locals.len();
-        let rets = returns.clone();
+        let rets = module.signatures[sig].returns.clone();
         let mut blocks = EntityVec::default();
         let entry = blocks.push(BlockDef::default());
         let mut values = EntityVec::default();
@@ -223,7 +206,6 @@ impl FunctionBody {
             value_blocks,
             value_locals: PerEntity::default(),
             source_locs: PerEntity::default(),
-            shared: *shared,
         }
     }
 
@@ -447,15 +429,10 @@ impl FunctionBody {
         self.value_locals[value] = Some(local);
     }
 
-    /// Append a value record to the instruction list in a block.
-    pub fn append_record_to_block(&mut self, block: Block, value: ValueRecord) {
-        self.blocks[block].insts.push(value.clone());
-        self.value_blocks[value.value] = block;
-    }
-
     /// Append a value to the instruction list in a block.
     pub fn append_to_block(&mut self, block: Block, value: Value) {
-        self.append_record_to_block(block, ValueRecord::core(value));
+        self.blocks[block].insts.push(value);
+        self.value_blocks[value] = block;
     }
 
     /// Set the terminator instruction on a block, updating the edge
@@ -476,12 +453,32 @@ impl FunctionBody {
         &'a self,
         indent: &'a str,
         module: Option<&'a Module>,
-    ) -> FunctionBodyDisplay<'a> {
+    ) -> FunctionBodyDisplay<'a, impl PrintDecorator> {
+        FunctionBodyDisplay::<NOPPrintDecorator> {
+            body: self,
+            indent,
+            verbose: false,
+            module,
+            decorator: None,
+        }
+    }
+
+    /// Prety-print this function body with some additional information.
+    /// `indent` is prepended to each line of output.
+    /// `module`, if provided, allows printing source locations as comments at each operator.
+    /// `decorator` describes how the additional information should be printed in the IR.
+    pub fn display_with_decorator<'a, PD: PrintDecorator>(
+        &'a self,
+        indent: &'a str,
+        module: Option<&'a Module>,
+        decorator: Option<&'a PD>,
+    ) -> FunctionBodyDisplay<'a, PD> {
         FunctionBodyDisplay {
             body: self,
             indent,
             verbose: false,
             module,
+            decorator: decorator,
         }
     }
 
@@ -492,12 +489,13 @@ impl FunctionBody {
         &'a self,
         indent: &'a str,
         module: Option<&'a Module>,
-    ) -> FunctionBodyDisplay<'a> {
-        FunctionBodyDisplay {
+    ) -> FunctionBodyDisplay<'a, impl PrintDecorator> {
+        FunctionBodyDisplay::<NOPPrintDecorator> {
             body: self,
             indent,
             verbose: true,
             module,
+            decorator: None,
         }
     }
 
@@ -530,8 +528,8 @@ impl FunctionBody {
             for &(_, param) in &block_def.params {
                 block_inst[param] = Some((block, None));
             }
-            for (i, inst) in block_def.insts.iter().enumerate() {
-                block_inst[inst.value] = Some((block, Some(i)));
+            for (i, &inst) in block_def.insts.iter().enumerate() {
+                block_inst[inst] = Some((block, Some(i)));
             }
         }
 
@@ -571,8 +569,7 @@ impl FunctionBody {
                 }
             };
 
-            for (i, inst) in block_def.insts.iter().enumerate() {
-                let inst = inst.value;
+            for (i, &inst) in block_def.insts.iter().enumerate() {
                 match &self.values[inst] {
                     &ValueDef::Operator(_, args, _) => {
                         for &arg in &self.arg_pool[args] {
@@ -634,10 +631,10 @@ impl FunctionBody {
     }
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct BlockDef {
     /// Instructions in this block.
-    pub insts: Vec<ValueRecord>,
+    pub insts: Vec<Value>,
     /// Terminator: branch or return.
     pub terminator: Terminator,
     /// Successor blocks.
@@ -654,55 +651,14 @@ pub struct BlockDef {
     pub desc: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct ValueRecord {
-    ///The value
-    pub value: Value,
-    ///The exception handler
-    // pub handler: PerEntity<ControlTag, Handler<HoleTarget>>,
-    // pub default_handler: Option<Handler<HoleTarget>>,
-    _private: (),
-}
-
-impl ValueRecord {
-    pub fn with_value<T>(&self, f: impl FnOnce(&mut Value) -> T) -> (T, Self) {
-        let mut x = self.clone();
-        let t = f(&mut x.value);
-        (t, x)
-    }
-    ///Obtains the core value within this record provided no on-the-spot effects
-    pub fn pure_core(&self) -> Option<Value> {
-        Some(self.value)
-    }
-    ///Creates a record froma  core value
-    pub fn core(a: Value) -> Self {
-        Self {
-            value: a,
-            // handler: Default::default(),
-            // default_handler: Default::default(),
-            _private: (),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockTarget {
     pub block: Block,
     pub args: Vec<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HoleTarget {
-    pub block: Block,
-    pub args: Vec<Either<usize, Value>>,
-    pub num_holes: usize,
-}
-
-pub type ExceptionTarget = HoleTarget;
-
-impl core::fmt::Display for BlockTarget {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+impl std::fmt::Display for BlockTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let args = self
             .args
             .iter()
@@ -711,21 +667,8 @@ impl core::fmt::Display for BlockTarget {
         write!(f, "{}({})", self.block, args.join(", "))
     }
 }
-impl core::fmt::Display for HoleTarget {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        let args = self
-            .args
-            .iter()
-            .map(|arg| match arg.as_ref() {
-                Either::Right(arg) => format!("{}", arg),
-                Either::Left(arg) => format!("hole{}", arg),
-            })
-            .collect::<Vec<_>>();
-        write!(f, "{}({})", self.block, args.join(", "))
-    }
-}
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Terminator {
     Br {
         target: BlockTarget,
@@ -743,32 +686,30 @@ pub enum Terminator {
     Return {
         values: Vec<Value>,
     },
+    /// Tail call to a function (`return_call`).
     ReturnCall {
         func: Func,
         args: Vec<Value>,
     },
+    /// Tail call through a table (`return_call_indirect`); the table
+    /// index is the last argument.
     ReturnCallIndirect {
         sig: Signature,
         table: Table,
         args: Vec<Value>,
     },
-    ReturnCallRef {
-        sig: Signature,
-        args: Vec<Value>,
-    },
     Unreachable,
-    UB,
     None,
 }
 
-impl core::default::Default for Terminator {
+impl std::default::Default for Terminator {
     fn default() -> Self {
         Terminator::None
     }
 }
 
-impl core::fmt::Display for Terminator {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+impl std::fmt::Display for Terminator {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Terminator::None => write!(f, "no_terminator")?,
             Terminator::Br { target } => write!(f, "br {}", target)?,
@@ -801,7 +742,6 @@ impl core::fmt::Display for Terminator {
                     .collect::<Vec<_>>()
                     .join(", ")
             )?,
-            Terminator::Unreachable => write!(f, "unreachable")?,
             Terminator::ReturnCall { func, args } => write!(
                 f,
                 "return_call {}({})",
@@ -821,48 +761,18 @@ impl core::fmt::Display for Terminator {
                     .collect::<Vec<_>>()
                     .join(", ")
             )?,
-            Terminator::ReturnCallRef { sig, args } => write!(
-                f,
-                "return_call_ref ({})({})",
-                sig,
-                // table,
-                args.iter()
-                    .map(|val| format!("{}", val))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )?,
-            crate::Terminator::UB => write!(f, "undefined")?,
+            Terminator::Unreachable => write!(f, "unreachable")?,
         }
         Ok(())
     }
 }
 
 impl Terminator {
-    pub fn num_targets(&self) -> usize {
-        match self {
-            Terminator::Br { target } => 1,
-            Terminator::CondBr {
-                cond,
-                if_true,
-                if_false,
-            } => 2,
-            Terminator::Select {
-                value,
-                targets,
-                default,
-            } => targets.len() + 1,
-            Terminator::Return { values } => 0,
-            Terminator::ReturnCall { func, args } => 0,
-            Terminator::ReturnCallIndirect { sig, table, args } => 0,
-            Terminator::ReturnCallRef { sig, args } => 0,
-            Terminator::Unreachable => 0,
-            Terminator::UB => 0,
-            Terminator::None => 0,
-        }
-    }
     pub fn visit_targets<F: FnMut(&BlockTarget)>(&self, mut f: F) {
         match self {
-            Terminator::Return { .. } => {}
+            Terminator::Return { .. }
+            | Terminator::ReturnCall { .. }
+            | Terminator::ReturnCallIndirect { .. } => {}
             Terminator::Br { ref target, .. } => f(target),
             Terminator::CondBr {
                 ref if_true,
@@ -882,17 +792,16 @@ impl Terminator {
                     f(target);
                 }
             }
-            Terminator::None | Terminator::UB => {}
+            Terminator::None => {}
             Terminator::Unreachable => {}
-            Terminator::ReturnCall { func, args } => {}
-            Terminator::ReturnCallIndirect { sig, table, args } => {}
-            Terminator::ReturnCallRef { sig, args } => {}
         }
     }
 
     pub fn update_targets<F: FnMut(&mut BlockTarget)>(&mut self, mut f: F) {
         match self {
-            Terminator::Return { .. } => {}
+            Terminator::Return { .. }
+            | Terminator::ReturnCall { .. }
+            | Terminator::ReturnCallIndirect { .. } => {}
             Terminator::Br { ref mut target, .. } => f(target),
             Terminator::CondBr {
                 ref mut if_true,
@@ -912,64 +821,59 @@ impl Terminator {
                     f(target);
                 }
             }
-            Terminator::None | Terminator::UB => {}
+            Terminator::None => {}
             Terminator::Unreachable => {}
-            Terminator::ReturnCall { func, args } => {}
-            Terminator::ReturnCallIndirect { sig, table, args } => {}
-            Terminator::ReturnCallRef { sig, args } => {}
         }
     }
-    pub fn visit_target<R, F: FnOnce(&BlockTarget) -> R>(&self, index: usize, mut f: F) -> R {
-        self.try_visit_target(index, f).expect("to be in bounds")
-    }
-    pub fn try_visit_target<R, F: FnOnce(&BlockTarget) -> R>(
-        &self,
-        index: usize,
-        mut f: F,
-    ) -> Result<R, usize> {
-        Ok(match (index, self) {
+
+    pub fn visit_target<R, F: FnMut(&BlockTarget) -> R>(&self, index: usize, mut f: F) -> R {
+        match (index, self) {
             (0, Terminator::Br { ref target, .. }) => f(target),
             (0, Terminator::CondBr { ref if_true, .. }) => f(if_true),
             (1, Terminator::CondBr { ref if_false, .. }) => f(if_false),
             (0, Terminator::Select { ref default, .. }) => f(default),
             (i, Terminator::Select { ref targets, .. }) if i <= targets.len() => f(&targets[i - 1]),
-            _ => return Err(index.wrapping_sub(self.num_targets())),
-        })
+            _ => panic!("out of bounds"),
+        }
     }
 
-    pub fn update_target<T, F: FnOnce(&mut BlockTarget) -> T>(
-        &mut self,
-        index: usize,
-        mut f: F,
-    ) -> Result<T, usize> {
-        Ok(match (index, self) {
+    pub fn update_target<F: FnMut(&mut BlockTarget)>(&mut self, index: usize, mut f: F) {
+        match (index, self) {
             (0, Terminator::Br { ref mut target, .. }) => f(target),
             (
                 0,
                 Terminator::CondBr {
                     ref mut if_true, ..
                 },
-            ) => f(if_true),
+            ) => {
+                f(if_true);
+            }
             (
                 1,
                 Terminator::CondBr {
                     ref mut if_false, ..
                 },
-            ) => f(if_false),
+            ) => {
+                f(if_false);
+            }
             (
                 0,
                 Terminator::Select {
                     ref mut default, ..
                 },
-            ) => f(default),
+            ) => {
+                f(default);
+            }
             (
                 i,
                 Terminator::Select {
                     ref mut targets, ..
                 },
-            ) if i <= targets.len() => f(&mut targets[i - 1]),
-            (i, this) => return Err(i.wrapping_sub(this.num_targets())),
-        })
+            ) if i <= targets.len() => {
+                f(&mut targets[i - 1]);
+            }
+            (i, this) => panic!("out of bounds: index {} term {:?}", i, this),
+        }
     }
 
     pub fn visit_successors<F: FnMut(Block)>(&self, mut f: F) {
@@ -990,18 +894,10 @@ impl Terminator {
                     f(value);
                 }
             }
-            &Terminator::ReturnCall { func, ref args } => {
-                for value in args {
-                    f(*value);
-                }
-            }
-            &Terminator::ReturnCallIndirect {
-                sig,
-                table,
-                ref args,
-            } => {
-                for value in args {
-                    f(*value);
+            &Terminator::ReturnCall { ref args, .. }
+            | &Terminator::ReturnCallIndirect { ref args, .. } => {
+                for &value in args {
+                    f(value);
                 }
             }
             _ => {}
@@ -1022,21 +918,8 @@ impl Terminator {
                     f(value);
                 }
             }
-            &mut Terminator::ReturnCall { func, ref mut args } => {
-                for value in args {
-                    f(value);
-                }
-            }
-            &mut Terminator::ReturnCallIndirect {
-                sig,
-                table,
-                ref mut args,
-            } => {
-                for value in args {
-                    f(value);
-                }
-            }
-            &mut Terminator::ReturnCallRef { sig, ref mut args } => {
+            &mut Terminator::ReturnCall { ref mut args, .. }
+            | &mut Terminator::ReturnCallIndirect { ref mut args, .. } => {
                 for value in args {
                     f(value);
                 }

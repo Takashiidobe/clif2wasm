@@ -13,9 +13,6 @@
 //! also be built from scratch with `Module::empty()`.
 
 #![allow(dead_code)]
-#![no_std]
-#[macro_use]
-extern crate alloc;
 
 // Re-export wasmparser for easier use of the right version by our embedders.
 pub use wasmparser;
@@ -28,7 +25,7 @@ pub mod entity;
 mod errors;
 mod frontend;
 mod ir;
-pub mod op_traits;
+mod op_traits;
 mod ops;
 pub mod passes;
 pub mod pool;
@@ -41,21 +38,8 @@ pub use ops::{Ieee32, Ieee64, MemoryArg, Operator};
 
 mod interp;
 pub use interp::*;
-pub mod util;
 
 pub use passes::basic_opt::OptOptions;
 
-#[cfg(feature = "copying")]
-pub mod copying;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
-#[cfg(feature = "ssa-traits-02")]
-mod ssa_traits_impls_02;
-#[cfg(feature = "ssa-traits-03")]
-mod ssa_traits_impls_03;
-#[cfg(feature = "hooking")]
-pub mod hooking;
-#[doc(hidden)]
-pub mod td;
-
-// mod td;

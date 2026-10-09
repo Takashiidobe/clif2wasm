@@ -5,9 +5,6 @@
 
 use crate::entity::PerEntity;
 use crate::ir::Block;
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
 use smallvec::{smallvec, SmallVec};
 
 pub fn calculate<'a, SuccFn: Fn(Block) -> &'a [Block]>(

@@ -4,10 +4,8 @@
 use crate::entity::EntityRef;
 use crate::ir::{FunctionBody, Value, ValueDef};
 use crate::Operator;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::convert::TryFrom;
-use hashbrown::{HashMap, HashSet};
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::convert::TryFrom;
 
 /// One "argument slot" of an operator defining a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,11 +39,11 @@ impl Trees {
         let mut owner = HashMap::default();
         let mut owned = HashMap::default();
         let mut remat = HashSet::default();
-        let mut multi_use: HashSet<Value> = HashSet::default();
+        let mut multi_use = HashSet::default();
 
         for block_def in body.blocks.values() {
-            for value in &block_def.insts {
-                match &body.values[value.value] {
+            for &value in &block_def.insts {
+                match &body.values[value] {
                     &ValueDef::Operator(op, args, _) => {
                         // Ignore operators with invalid args: these must
                         // always be unreachable.
@@ -55,7 +53,7 @@ impl Trees {
                         // If this is an always-rematerialized operator,
                         // mark it as such and continue.
                         if is_remat(&op) {
-                            remat.insert(value.value);
+                            remat.insert(value);
                             continue;
                         }
 
@@ -74,7 +72,7 @@ impl Trees {
                                 multi_use.insert(arg);
                             } else if Self::is_movable(body, arg) {
                                 let pos = u16::try_from(i).unwrap();
-                                let value_arg = ValueArg(value.value, pos);
+                                let value_arg = ValueArg(value, pos);
                                 owner.insert(arg, value_arg);
                                 owned.insert(value_arg, arg);
                             }
