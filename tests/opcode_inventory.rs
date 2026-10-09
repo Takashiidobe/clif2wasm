@@ -62,3 +62,16 @@ fn registry_statuses_are_valid_and_explained() {
         }
     }
 }
+
+#[test]
+fn immediate_and_complement_forms_are_not_exposed() {
+    let exposed: Vec<String> = Opcode::all()
+        .iter()
+        .map(|op| op.to_string())
+        .filter(|name| name.ends_with("_imm") || name.ends_with("_not"))
+        .collect();
+    assert!(
+        exposed.is_empty(),
+        "Cranelift now exposes immediate/complement forms; lower them and update docs/opcode-coverage.md: {exposed:?}"
+    );
+}

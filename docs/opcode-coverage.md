@@ -19,3 +19,11 @@ multiply) live in the per-area docs (`simd.md`, `i128.md`), not here.
 2. For each reported opcode, probe it with a small CLIF function through `WasmModule`.
 3. Add a line with its status. Add a note for `partial` and `unsupported`, and file a bead for unsupported opcodes wasm can express.
 4. When a bead lowers an opcode, flip its line in the same commit.
+
+## Immediate and complement forms
+
+`iadd_imm`, `imul_imm`, `irsub_imm`, `icmp_imm`, the div/rem, shift and rotate `_imm`
+forms, and `band_not`/`bor_not`/`bxor_not`/`*_imm` bitwise forms are not in the pinned
+Cranelift's `Opcode::all()`: the instruction builder folds immediates into `iconst`
+operands. Nothing needs lowering. `immediate_and_complement_forms_are_not_exposed`
+fails if a Cranelift upgrade adds any opcode ending in `_imm` or `_not`.
