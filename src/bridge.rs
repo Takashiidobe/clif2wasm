@@ -351,6 +351,31 @@ pub fn translate_function(
         let mut wb = bmap[&block];
         for inst in clif.layout.block_insts(block) {
             match &clif.dfg.insts[inst] {
+                InstructionData::IntAddTrap { .. } => {
+                    let instruction = clif.dfg.display_inst(inst).to_string();
+                    let function = clif.name.to_string();
+                    let overflow = ops::lower_add_trap_value(&mut cx, &mut body, wb, inst)
+                        .with_context(|| format!("lowering `{instruction}`"))
+                        .map_err(|error| error.at_instruction(&function, &instruction))?;
+                    let trap = body.add_block();
+                    let resume = body.add_block();
+                    body.set_terminator(trap, Terminator::Unreachable);
+                    body.set_terminator(
+                        wb,
+                        Terminator::CondBr {
+                            cond: overflow,
+                            if_true: BlockTarget {
+                                block: trap,
+                                args: vec![],
+                            },
+                            if_false: BlockTarget {
+                                block: resume,
+                                args: vec![],
+                            },
+                        },
+                    );
+                    wb = resume;
+                }
                 InstructionData::CondTrap { opcode, arg, .. } => {
                     let cond = ops::coerce_cond(&cx, &mut body, wb, *arg)?;
                     let trap = body.add_block();

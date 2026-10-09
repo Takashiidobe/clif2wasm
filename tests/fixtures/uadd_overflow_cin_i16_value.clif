@@ -1,0 +1,25 @@
+; run: %value(0, 0, 0) == 0
+; run: %value(0, 2, 1) == 3
+; run: %value(0, 65534, 0) == 65534
+; run: %value(1, 0, 1) == 2
+; run: %value(1, 32767, 0) == 32768
+; run: %value(1, 65534, 1) == 0
+; run: %value(2, 1, 0) == 3
+; run: %value(2, 32767, 1) == 32770
+; run: %value(2, 65535, 0) == 1
+; run: %value(32767, 1, 1) == 32769
+; run: %value(32767, 32768, 0) == 65535
+; run: %value(32767, 65535, 1) == 32767
+; run: %value(32768, 2, 0) == 32770
+; run: %value(32768, 32768, 1) == 1
+; run: %value(65534, 0, 0) == 65534
+; run: %value(65534, 2, 1) == 1
+; run: %value(65534, 65534, 0) == 65532
+; run: %value(65535, 0, 1) == 0
+; run: %value(65535, 32767, 0) == 32766
+; run: %value(65535, 65534, 1) == 65534
+function %value(i16, i16, i8) -> i16 {
+block0(v0: i16, v1: i16, v2: i8):
+    v3, v4 = uadd_overflow_cin v0, v1, v2
+    return v3
+}

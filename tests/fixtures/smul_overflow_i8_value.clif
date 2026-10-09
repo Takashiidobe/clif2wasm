@@ -1,0 +1,32 @@
+; run: %value(-128, -128) == 0
+; run: %value(-128, -1) == -128
+; run: %value(-128, 64) == 0
+; run: %value(-127, -128) == -128
+; run: %value(-127, -1) == 127
+; run: %value(-127, 64) == 64
+; run: %value(-2, -128) == 0
+; run: %value(-2, -1) == 2
+; run: %value(-2, 64) == -128
+; run: %value(-1, -128) == -128
+; run: %value(-1, -1) == 1
+; run: %value(-1, 64) == -64
+; run: %value(0, -128) == 0
+; run: %value(0, -1) == 0
+; run: %value(0, 64) == 0
+; run: %value(1, -128) == -128
+; run: %value(1, -1) == -1
+; run: %value(1, 64) == 64
+; run: %value(64, -128) == 0
+; run: %value(64, -1) == -64
+; run: %value(64, 64) == 0
+; run: %value(126, -128) == 0
+; run: %value(126, -1) == -126
+; run: %value(126, 64) == -128
+; run: %value(127, -128) == -128
+; run: %value(127, -1) == -127
+; run: %value(127, 64) == -64
+function %value(i8, i8) -> i8 {
+block0(v0: i8, v1: i8):
+    v2, v3 = smul_overflow v0, v1
+    return v2
+}

@@ -1,0 +1,22 @@
+; run: %value(0, 0) == 0
+; run: %value(0, 127) == 0
+; run: %value(0, 255) == 0
+; run: %value(1, 2) == 2
+; run: %value(1, 254) == 254
+; run: %value(2, 1) == 2
+; run: %value(2, 128) == 0
+; run: %value(127, 0) == 0
+; run: %value(127, 127) == 1
+; run: %value(127, 255) == 129
+; run: %value(128, 2) == 0
+; run: %value(128, 254) == 0
+; run: %value(254, 1) == 254
+; run: %value(254, 128) == 0
+; run: %value(255, 0) == 0
+; run: %value(255, 127) == 129
+; run: %value(255, 255) == 1
+function %value(i8, i8) -> i8 {
+block0(v0: i8, v1: i8):
+    v2, v3 = umul_overflow v0, v1
+    return v2
+}

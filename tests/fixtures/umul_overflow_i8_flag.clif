@@ -1,0 +1,54 @@
+; run: %flag(0, 0) == 0
+; run: %flag(0, 1) == 0
+; run: %flag(0, 2) == 0
+; run: %flag(0, 127) == 0
+; run: %flag(0, 128) == 0
+; run: %flag(0, 254) == 0
+; run: %flag(0, 255) == 0
+; run: %flag(1, 0) == 0
+; run: %flag(1, 1) == 0
+; run: %flag(1, 2) == 0
+; run: %flag(1, 127) == 0
+; run: %flag(1, 128) == 0
+; run: %flag(1, 254) == 0
+; run: %flag(1, 255) == 0
+; run: %flag(2, 0) == 0
+; run: %flag(2, 1) == 0
+; run: %flag(2, 2) == 0
+; run: %flag(2, 127) == 0
+; run: %flag(2, 128) == 1
+; run: %flag(2, 254) == 1
+; run: %flag(2, 255) == 1
+; run: %flag(127, 0) == 0
+; run: %flag(127, 1) == 0
+; run: %flag(127, 2) == 0
+; run: %flag(127, 127) == 1
+; run: %flag(127, 128) == 1
+; run: %flag(127, 254) == 1
+; run: %flag(127, 255) == 1
+; run: %flag(128, 0) == 0
+; run: %flag(128, 1) == 0
+; run: %flag(128, 2) == 1
+; run: %flag(128, 127) == 1
+; run: %flag(128, 128) == 1
+; run: %flag(128, 254) == 1
+; run: %flag(128, 255) == 1
+; run: %flag(254, 0) == 0
+; run: %flag(254, 1) == 0
+; run: %flag(254, 2) == 1
+; run: %flag(254, 127) == 1
+; run: %flag(254, 128) == 1
+; run: %flag(254, 254) == 1
+; run: %flag(254, 255) == 1
+; run: %flag(255, 0) == 0
+; run: %flag(255, 1) == 0
+; run: %flag(255, 2) == 1
+; run: %flag(255, 127) == 1
+; run: %flag(255, 128) == 1
+; run: %flag(255, 254) == 1
+; run: %flag(255, 255) == 1
+function %flag(i8, i8) -> i8 {
+block0(v0: i8, v1: i8):
+    v2, v3 = umul_overflow v0, v1
+    return v3
+}

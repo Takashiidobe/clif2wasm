@@ -21,6 +21,7 @@ mod cmp;
 mod i128;
 mod int;
 mod mem;
+mod overflow;
 mod select;
 mod vector;
 use atomic::*;
@@ -31,6 +32,8 @@ use i128::*;
 pub(crate) use int::mask_narrow;
 use int::*;
 use mem::*;
+pub(crate) use overflow::lower_add_trap_value;
+use overflow::*;
 use select::*;
 pub(crate) use vector::normalize_vector;
 use vector::*;
@@ -341,16 +344,12 @@ pub fn lower_inst(
             );
         }
 
-        InstructionData::Ternary { opcode, args }
-            if matches!(
-                opcode,
-                Opcode::UaddOverflowCin
-                    | Opcode::SaddOverflowCin
-                    | Opcode::UsubOverflowBin
-                    | Opcode::SsubOverflowBin
-            ) && dfg.value_type(dfg.first_result(inst)) == types::I128 =>
-        {
-            lower_i128_carry(cx, body, wb, inst, opcode, args)?;
+        InstructionData::Ternary { opcode, args } if is_overflow_opcode(opcode) => {
+            if dfg.value_type(dfg.first_result(inst)) == types::I128 {
+                lower_i128_carry(cx, body, wb, inst, opcode, args)?;
+            } else {
+                lower_scalar_overflow(cx, body, wb, inst)?;
+            }
         }
 
         // --- Select ---

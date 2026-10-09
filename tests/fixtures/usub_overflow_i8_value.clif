@@ -1,0 +1,22 @@
+; run: %value(0, 0) == 0
+; run: %value(0, 127) == 129
+; run: %value(0, 255) == 1
+; run: %value(1, 2) == 255
+; run: %value(1, 254) == 3
+; run: %value(2, 1) == 1
+; run: %value(2, 128) == 130
+; run: %value(127, 0) == 127
+; run: %value(127, 127) == 0
+; run: %value(127, 255) == 128
+; run: %value(128, 2) == 126
+; run: %value(128, 254) == 130
+; run: %value(254, 1) == 253
+; run: %value(254, 128) == 126
+; run: %value(255, 0) == 255
+; run: %value(255, 127) == 128
+; run: %value(255, 255) == 0
+function %value(i8, i8) -> i8 {
+block0(v0: i8, v1: i8):
+    v2, v3 = usub_overflow v0, v1
+    return v2
+}

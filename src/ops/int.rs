@@ -1055,6 +1055,11 @@ pub(super) fn lower_binary(
         return Ok(());
     }
 
+    if is_overflow_opcode(opcode) && rty != types::I128 {
+        lower_scalar_overflow(cx, body, wb, inst)?;
+        return Ok(());
+    }
+
     // i128: pair legalization.
     if rty == types::I128 {
         if matches!(
@@ -1065,6 +1070,10 @@ pub(super) fn lower_binary(
                 | Opcode::SsubOverflow
         ) {
             lower_i128_overflow(cx, body, wb, inst, opcode, args)?;
+            return Ok(());
+        }
+        if matches!(opcode, Opcode::UmulOverflow | Opcode::SmulOverflow) {
+            lower_i128_mul_overflow(cx, body, wb, inst, opcode, args)?;
             return Ok(());
         }
         lower_binary_i128(cx, body, wb, result, opcode, args)?;
