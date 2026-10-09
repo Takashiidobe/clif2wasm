@@ -129,19 +129,8 @@ bd prime                # Refresh Beads context
 
 ## Documentation
 
-Maintainer docs live in `docs/`; the work to write them is epic `clif2wasm-boo` (`bd show clif2wasm-boo`). Until a doc exists, its bead is the spec.
+Maintainer docs are in `docs/` (being written under epic `clif2wasm-boo`; until one exists, its bead is the spec): `architecture.md`, `relocatable-form.md`, `memory-and-modes.md`, `testing.md`, plus `i128.md`, `simd.md`, `stack-operations.md`.
 
-| Doc | Read before changing |
-|---|---|
-| `docs/architecture.md` | anything: pipeline and which file owns what |
-| `docs/relocatable-form.md` | `relocatable.rs`, `link.rs`, `object.rs`: symbol order, markers, relocs, table policy |
-| `docs/memory-and-modes.md` | memory layout, shadow stack, whole-module vs object vs session behavior |
-| `docs/testing.md` | adding or running tests and fixtures |
-| `docs/i128.md`, `docs/simd.md`, `docs/stack-operations.md` | the matching lowering in `ops.rs`/`i128_lower.rs` |
-
-Workflow:
-
-1. Read the relevant doc before editing the code it covers.
-2. If a change alters an invariant a doc states, update that doc in the same commit.
-3. Keep docs to one page: invariants, ownership, and why. No narration of code, no TODO lists (use `bd`).
-4. If code and doc disagree, the code is the truth for now: fix the doc and say so in the commit.
+- Read the relevant doc before editing the code it covers.
+- Update it in the same commit if you change an invariant it states.
+- One page, invariants and why only; TODOs go in `bd`.
