@@ -14,7 +14,8 @@ i8x16.
 - Construction and lanes: `vconst`, `scalar_to_vector`, `splat`, `insertlane`,
   `extractlane`, `shuffle`, `swizzle`, `x86_pshufb`
 - Memory: vector `load`/`store`, widening loads
-- `bitcast`, `select`, `blendv`, `bitselect`
+- `bitcast`, `select`, `select_spectre_guard` (same lowering as `select`; wasm has no speculation to guard), `blendv`, `bitselect`
+- x86 ops legalized to host-independent wasm: `x86_pmulhrsw`, `x86_pmaddubsw` (i8x16 only; extend, multiply, saturating pairwise add), `x86_cvtt2dq` (f32x4 to i32x4 only; `INT_MIN` for NaN and overflow, unlike wasm's saturating truncation)
 - Arithmetic: add, sub, mul (where Wasm has the lane op), signed/unsigned
   min/max, saturating add/sub, integer abs, `iadd_pairwise`, `smulhi`/`umulhi`,
   float sign-copy

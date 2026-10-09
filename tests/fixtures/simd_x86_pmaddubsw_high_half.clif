@@ -1,0 +1,9 @@
+; wasm-run: %pmadd() == 3
+function %pmadd() -> i16 {
+block0:
+    v0 = vconst.i8x16 [0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2]
+    v1 = vconst.i8x16 [0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1]
+    v2 = x86_pmaddubsw v0, v1
+    v3 = extractlane.i16x8 v2, 7
+    return v3
+}

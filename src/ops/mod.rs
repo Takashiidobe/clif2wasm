@@ -165,6 +165,10 @@ pub fn lower_inst(
         } => unsupported!(
             "pinned registers are unsupported: wasm has no reserved register and the relocatable form has no slot for a pinned-register global"
         ),
+        InstructionData::Unary {
+            opcode: Opcode::X86Cvtt2dq,
+            ..
+        } => lower_x86_cvtt2dq(cx, body, wb, inst)?,
         InstructionData::Unary { opcode, arg } => {
             lower_unary(cx, body, wb, inst, opcode, arg)?;
         }
@@ -193,6 +197,11 @@ pub fn lower_inst(
             );
             cx.bind_vector(result, vec![value]);
         }
+
+        InstructionData::Binary {
+            opcode: Opcode::X86Pmaddubsw,
+            ..
+        } => lower_x86_pmaddubsw(cx, body, wb, inst)?,
 
         InstructionData::Binary {
             opcode: opcode @ (Opcode::Swizzle | Opcode::X86Pshufb),
@@ -346,7 +355,7 @@ pub fn lower_inst(
 
         // --- Select ---
         InstructionData::Ternary {
-            opcode: Opcode::Select,
+            opcode: Opcode::Select | Opcode::SelectSpectreGuard,
             ..
         } => lower_select(cx, body, wb, inst)?,
 

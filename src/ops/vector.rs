@@ -727,3 +727,117 @@ pub(super) fn vector_float_unary_operator(opcode: Opcode, lane: ir::Type) -> Res
         _ => unsupported!("vector float unary {opcode} on lane type {lane} is unsupported"),
     })
 }
+
+pub(super) fn lower_x86_pmaddubsw(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+) -> Result<()> {
+    let dfg = &cx.clif.dfg;
+    let InstructionData::Binary { args, .. } = dfg.insts[inst] else {
+        unreachable!("lower_x86_pmaddubsw dispatched on a non-matching instruction")
+    };
+    let result = dfg.first_result(inst);
+    ensure!(
+        dfg.value_type(result) == types::I16X8,
+        "x86_pmaddubsw must produce i16x8, got {}",
+        dfg.value_type(result)
+    );
+    let signed = cx.vector(args[0])?[0];
+    let unsigned = cx.vector(args[1])?[0];
+    let mut products = Vec::with_capacity(2);
+    for (extend_signed, extend_unsigned) in [
+        (
+            Operator::I16x8ExtendLowI8x16S,
+            Operator::I16x8ExtendLowI8x16U,
+        ),
+        (
+            Operator::I16x8ExtendHighI8x16S,
+            Operator::I16x8ExtendHighI8x16U,
+        ),
+    ] {
+        let s = body.add_op(wb, extend_signed, &[signed], &[Type::V128]);
+        let u = body.add_op(wb, extend_unsigned, &[unsigned], &[Type::V128]);
+        products.push(body.add_op(wb, Operator::I16x8Mul, &[s, u], &[Type::V128]));
+    }
+    let pick = |parity: u8| -> [u8; 16] {
+        let mut lanes = [0u8; 16];
+        for pair in 0..8u8 {
+            let byte = 4 * pair + 2 * parity;
+            lanes[2 * pair as usize] = byte;
+            lanes[2 * pair as usize + 1] = byte + 1;
+        }
+        lanes
+    };
+    let evens = body.add_op(
+        wb,
+        Operator::I8x16Shuffle { lanes: pick(0) },
+        &[products[0], products[1]],
+        &[Type::V128],
+    );
+    let odds = body.add_op(
+        wb,
+        Operator::I8x16Shuffle { lanes: pick(1) },
+        &[products[0], products[1]],
+        &[Type::V128],
+    );
+    let sum = body.add_op(wb, Operator::I16x8AddSatS, &[evens, odds], &[Type::V128]);
+    cx.bind_vector(result, vec![sum]);
+    Ok(())
+}
+
+pub(super) fn lower_x86_cvtt2dq(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+) -> Result<()> {
+    let dfg = &cx.clif.dfg;
+    let InstructionData::Unary { arg, .. } = dfg.insts[inst] else {
+        unreachable!("lower_x86_cvtt2dq dispatched on a non-matching instruction")
+    };
+    let result = dfg.first_result(inst);
+    ensure!(
+        dfg.value_type(arg) == types::F32X4 && dfg.value_type(result) == types::I32X4,
+        "x86_cvtt2dq supports f32x4 -> i32x4 only, got {} -> {}",
+        dfg.value_type(arg),
+        dfg.value_type(result)
+    );
+    let x = cx.vector(arg)?[0];
+    let saturated = body.add_op(wb, Operator::I32x4TruncSatF32x4S, &[x], &[Type::V128]);
+    let int_max = body.add_op(
+        wb,
+        Operator::I32Const {
+            value: i32::MAX as u32,
+        },
+        &[],
+        &[Type::I32],
+    );
+    let max_lanes = body.add_op(wb, Operator::I32x4Splat, &[int_max], &[Type::V128]);
+    let overflow = body.add_op(
+        wb,
+        Operator::I32x4Eq,
+        &[saturated, max_lanes],
+        &[Type::V128],
+    );
+    let nan = body.add_op(wb, Operator::F32x4Ne, &[x, x], &[Type::V128]);
+    let invalid = body.add_op(wb, Operator::V128Or, &[overflow, nan], &[Type::V128]);
+    let int_min = body.add_op(
+        wb,
+        Operator::I32Const {
+            value: i32::MIN as u32,
+        },
+        &[],
+        &[Type::I32],
+    );
+    let min_lanes = body.add_op(wb, Operator::I32x4Splat, &[int_min], &[Type::V128]);
+    let value = body.add_op(
+        wb,
+        Operator::V128Bitselect,
+        &[min_lanes, saturated, invalid],
+        &[Type::V128],
+    );
+    cx.bind_vector(result, vec![value]);
+    Ok(())
+}

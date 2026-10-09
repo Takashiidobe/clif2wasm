@@ -1,0 +1,9 @@
+; wasm-run: %pick(1) == 10
+; wasm-run: %pick(0) == 20
+function %pick(i32) -> i32 {
+block0(v0: i32):
+    v1 = iconst.i32 10
+    v2 = iconst.i32 20
+    v3 = select_spectre_guard v0, v1, v2
+    return v3
+}

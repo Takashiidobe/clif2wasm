@@ -15,7 +15,7 @@ pub(super) fn lower_select(
 ) -> Result<()> {
     let dfg = &cx.clif.dfg;
     let InstructionData::Ternary {
-        opcode: Opcode::Select,
+        opcode: Opcode::Select | Opcode::SelectSpectreGuard,
         args,
     } = dfg.insts[inst]
     else {
