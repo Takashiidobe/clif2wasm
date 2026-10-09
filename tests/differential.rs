@@ -11,16 +11,25 @@ use wasmi::{Engine, Instance, Module, Store, Val};
 
 #[test]
 fn fixtures_match_cranelift_interpreter() {
-    let mut paths = fs::read_dir("tests/fixtures")
-        .expect("read tests/fixtures")
-        .map(|entry| entry.expect("read fixture entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "clif"))
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    collect_fixtures(Path::new("tests/fixtures"), &mut paths);
     paths.sort();
     assert!(!paths.is_empty(), "no .clif fixtures found");
 
     for path in paths {
         run_fixture(&path);
+    }
+}
+
+fn collect_fixtures(directory: &Path, paths: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(directory).unwrap_or_else(|e| panic!("{}: {e}", directory.display()))
+    {
+        let path = entry.expect("read fixture entry").path();
+        if path.is_dir() {
+            collect_fixtures(&path, paths);
+        } else if path.extension().is_some_and(|ext| ext == "clif") {
+            paths.push(path);
+        }
     }
 }
 
@@ -49,9 +58,9 @@ fn run_fixture(path: &Path) {
         path.display()
     );
 
-    let wasm =
-        clif2wasm::translate_module(&[clif2wasm::NamedClifFunc::new("test", function)], "test")
-            .unwrap_or_else(|e| panic!("translating {}: {e:#}", path.display()));
+    let named = [clif2wasm::NamedClifFunc::new("test", function)];
+    let wasm = clif2wasm::translate_module(&named, "test")
+        .unwrap_or_else(|e| panic!("translating {}: {e:#}", path.display()));
     let engine = Engine::default();
     let module = Module::new(&engine, &wasm)
         .unwrap_or_else(|e| panic!("validating wasm from {}: {e}", path.display()));

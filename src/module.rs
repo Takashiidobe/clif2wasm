@@ -25,12 +25,22 @@ pub fn translate_module(
     data: &[NamedClifData],
     exports: &[&str],
 ) -> Result<Vec<u8>> {
-    translate_module_impl(
+    translate_module_with_options(funcs, data, exports, crate::TranslationOptions::default())
+}
+
+pub fn translate_module_with_options(
+    funcs: &[NamedClifFunc],
+    data: &[NamedClifData],
+    exports: &[&str],
+    options: crate::TranslationOptions,
+) -> Result<Vec<u8>> {
+    translate_module_impl_with_options(
         funcs,
         data,
         exports,
         &Default::default(),
         &Default::default(),
+        options,
     )
 }
 
@@ -44,7 +54,33 @@ pub fn translate_module_impl(
     runtime_overrides: &std::collections::HashMap<usize, RuntimeFn>,
     imports: &std::collections::HashMap<usize, String>,
 ) -> Result<Vec<u8>> {
-    translate_module_with_layout(funcs, data, exports, runtime_overrides, imports, None)
+    translate_module_impl_with_options(
+        funcs,
+        data,
+        exports,
+        runtime_overrides,
+        imports,
+        crate::TranslationOptions::default(),
+    )
+}
+
+pub(crate) fn translate_module_impl_with_options(
+    funcs: &[NamedClifFunc],
+    data: &[NamedClifData],
+    exports: &[&str],
+    runtime_overrides: &std::collections::HashMap<usize, RuntimeFn>,
+    imports: &std::collections::HashMap<usize, String>,
+    options: crate::TranslationOptions,
+) -> Result<Vec<u8>> {
+    translate_module_with_layout_options(
+        funcs,
+        data,
+        exports,
+        runtime_overrides,
+        imports,
+        None,
+        options,
+    )
 }
 
 pub struct SessionLayout<'a> {
@@ -59,6 +95,26 @@ pub fn translate_module_with_layout(
     runtime_overrides: &HashMap<usize, RuntimeFn>,
     imports: &HashMap<usize, String>,
     layout: Option<SessionLayout<'_>>,
+) -> Result<Vec<u8>> {
+    translate_module_with_layout_options(
+        funcs,
+        data,
+        exports,
+        runtime_overrides,
+        imports,
+        layout,
+        crate::TranslationOptions::default(),
+    )
+}
+
+pub fn translate_module_with_layout_options(
+    funcs: &[NamedClifFunc],
+    data: &[NamedClifData],
+    exports: &[&str],
+    runtime_overrides: &HashMap<usize, RuntimeFn>,
+    imports: &HashMap<usize, String>,
+    layout: Option<SessionLayout<'_>>,
+    options: crate::TranslationOptions,
 ) -> Result<Vec<u8>> {
     let mut module = waffle::Module::empty();
 
@@ -99,6 +155,13 @@ pub fn translate_module_with_layout(
     let statics_end = ((cur + 15) & !15) as u64;
     let stack_top = core::cmp::max(STACK_TOP, statics_end + 0x1_0000);
     let pages = stack_top.div_ceil(0x1_0000);
+    let shared_memory = options.shared_memory_max_pages.is_some();
+    if let Some(max_pages) = options.shared_memory_max_pages {
+        ensure!(
+            max_pages >= pages as usize,
+            "shared memory maximum {max_pages} pages is below the module requirement of {pages} pages"
+        );
+    }
 
     // Apply data relocations now that every address is known: pointer slots get the
     // target's linear-memory address (data) or funcref-table index (function).
@@ -139,8 +202,11 @@ pub fn translate_module_with_layout(
     }
     let mem0 = module.memories.push(MemoryData {
         initial_pages: if layout.is_some() { 0 } else { pages as usize },
-        maximum_pages: None,
+        maximum_pages: options.shared_memory_max_pages,
         segments,
+        memory64: false,
+        shared: shared_memory,
+        page_size_log2: None,
     });
 
     // The shadow-stack pointer (plan §8): a mutable i32 global, decremented per frame.
@@ -176,9 +242,10 @@ pub fn translate_module_with_layout(
                     first_line(&format!("{e:#}"))
                 );
                 force_stub.insert(k);
-                SignatureData {
+                SignatureData::Func {
                     params: vec![],
                     returns: vec![],
+                    shared: false,
                 }
             }
             Err(e) => {
@@ -215,7 +282,10 @@ pub fn translate_module_with_layout(
         let mut elements = vec![waffle::Func::invalid()];
         elements.extend(wfuncs.iter().copied());
         module.tables.push(TableData {
-            ty: Type::FuncRef,
+            ty: Type::Heap(waffle::WithNullable {
+                value: waffle::HeapType::FuncRef,
+                nullable: true,
+            }),
             initial: if layout.is_some() {
                 0
             } else {
@@ -231,6 +301,7 @@ pub fn translate_module_with_layout(
             } else {
                 Some(elements)
             },
+            table64: false,
         })
     };
 
@@ -317,7 +388,10 @@ pub fn translate_module_with_layout(
                     let data = signature_data(&nf.func.dfg.signatures[*sig_ref])?;
                     let sig = intern_sig(&mut module, &mut sig_cache, data.clone());
                     let mut marker_data = data;
-                    marker_data.params.push(Type::I32);
+                    let SignatureData::Func { params, .. } = &mut marker_data else {
+                        bail!("tail-call signature is not a function")
+                    };
+                    params.push(Type::I32);
                     (
                         (true, sig.index() as u32),
                         marker_data,
@@ -343,6 +417,7 @@ pub fn translate_module_with_layout(
     let mctx = ModCtx {
         callees: &wfuncs,
         mem0,
+        shared_memory,
         stack_limit: Some(if layout.is_some() {
             4096
         } else {
@@ -454,6 +529,17 @@ pub fn translate_module_with_layout(
         });
     }
 
+    if shared_memory {
+        ensure!(
+            !exports.contains(&"memory"),
+            "shared memory export name `memory` conflicts with a function export"
+        );
+        module.exports.push(Export {
+            name: "memory".into(),
+            kind: ExportKind::Memory(mem0),
+        });
+    }
+
     let bytes = module.to_wasm_bytes().context("waffle backend compile")?;
     crate::tail::rewrite(&bytes, tail_targets)
 }
@@ -483,13 +569,14 @@ pub(crate) fn synth_runtime_body(
     mem0: waffle::Memory,
 ) -> Result<FunctionBody> {
     let sigdata = &module.signatures[sig];
+    let (params, returns) = signature_parts(sigdata)?;
     // The memory intrinsics shims: (mem, delta) -> prev_pages / (mem) -> pages.
     // The mem index param is carried for signature parity with the LLVM
     // intrinsic and ignored (single linear memory).
     match kind {
         RuntimeFn::MemoryGrow => {
             ensure!(
-                sigdata.params.len() == 2 && sigdata.returns.len() == 1,
+                params.len() == 2 && returns.len() == 1,
                 "MemoryGrow expects (i32, i32) -> i32, got {sigdata:?}"
             );
             let mut body = FunctionBody::new(module, sig);
@@ -506,7 +593,7 @@ pub(crate) fn synth_runtime_body(
         }
         RuntimeFn::MemorySize => {
             ensure!(
-                sigdata.params.len() == 1 && sigdata.returns.len() == 1,
+                params.len() == 1 && returns.len() == 1,
                 "MemorySize expects (i32) -> i32, got {sigdata:?}"
             );
             let mut body = FunctionBody::new(module, sig);
@@ -523,11 +610,11 @@ pub(crate) fn synth_runtime_body(
         _ => {}
     }
     ensure!(
-        sigdata.params.len() == 3 && sigdata.params.iter().all(|&t| t == Type::I32),
+        params.len() == 3 && params.iter().all(|&t| t == Type::I32),
         "runtime {kind:?} expects (i32, i32, i32) params, got {:?}",
-        sigdata.params
+        params
     );
-    let returns_ptr = !sigdata.returns.is_empty();
+    let returns_ptr = !returns.is_empty();
     let mut body = FunctionBody::new(module, sig);
     let entry = body.entry;
     let a = body.blocks[entry].params[0].1;
@@ -657,6 +744,15 @@ pub(crate) fn intern_sig(
         .or_insert_with(|| module.signatures.push(data))
 }
 
+pub(crate) fn signature_parts(data: &SignatureData) -> Result<(&[Type], &[Type])> {
+    match data {
+        SignatureData::Func {
+            params, returns, ..
+        } => Ok((params, returns)),
+        _ => bail!("expected a function signature, got {data:?}"),
+    }
+}
+
 pub(crate) fn signature_data(sig: &ir::Signature) -> Result<SignatureData> {
     let expand_abi = |p: &ir::AbiParam| -> Result<Vec<Type>> {
         match p.purpose {
@@ -681,5 +777,9 @@ pub(crate) fn signature_data(sig: &ir::Signature) -> Result<SignatureData> {
     for r in &sig.returns {
         returns.extend(expand_abi(r)?);
     }
-    Ok(SignatureData { params, returns })
+    Ok(SignatureData::Func {
+        params,
+        returns,
+        shared: false,
+    })
 }

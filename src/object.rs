@@ -267,6 +267,9 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         initial_pages: 1,
         maximum_pages: None,
         segments: vec![],
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
     });
     module.imports.push(waffle::Import {
         module: "env".to_string(),
@@ -284,10 +287,14 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
         kind: waffle::ImportKind::Global(sp_global),
     });
     let table = module.tables.push(TableData {
-        ty: Type::FuncRef,
+        ty: Type::Heap(waffle::WithNullable {
+            value: waffle::HeapType::FuncRef,
+            nullable: true,
+        }),
         initial: 0,
         max: None,
         func_elements: None,
+        table64: false,
     });
     module.imports.push(waffle::Import {
         module: "env".to_string(),
@@ -466,6 +473,7 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     let mctx = ModCtx {
         callees: &wfuncs,
         mem0,
+        shared_memory: false,
         stack_limit: None,
         sp_global,
         table,
@@ -523,13 +531,19 @@ pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> 
     let mut p = Vec::new();
     uleb(&mut p, module.signatures.len() as u64);
     for (_sig, sd) in module.signatures.entries() {
+        let SignatureData::Func {
+            params, returns, ..
+        } = sd
+        else {
+            bail!("non-function type in object module signatures: {sd:?}");
+        };
         p.push(0x60);
-        uleb(&mut p, sd.params.len() as u64);
-        for &t in &sd.params {
+        uleb(&mut p, params.len() as u64);
+        for &t in params {
             p.push(valtype_byte(t)?);
         }
-        uleb(&mut p, sd.returns.len() as u64);
-        for &t in &sd.returns {
+        uleb(&mut p, returns.len() as u64);
+        for &t in returns {
             p.push(valtype_byte(t)?);
         }
     }

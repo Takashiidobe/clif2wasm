@@ -1,0 +1,7 @@
+; run: %count(-1) == 8
+; run: %count(15) == 4
+function %count(i8) -> i8 {
+block0(v0: i8):
+    v1 = popcnt v0
+    return v1
+}

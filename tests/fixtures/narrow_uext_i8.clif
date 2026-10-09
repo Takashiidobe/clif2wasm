@@ -1,0 +1,7 @@
+; run: %widen(-1) == 255
+; run: %widen(-128) == 128
+function %widen(i8) -> i32 {
+block0(v0: i8):
+    v1 = uextend.i32 v0
+    return v1
+}

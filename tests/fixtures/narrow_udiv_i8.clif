@@ -1,0 +1,7 @@
+; run: %divide(-1, 2) == 127
+; run: %divide(-128, 2) == 64
+function %divide(i8, i8) -> i8 {
+block0(v0: i8, v1: i8):
+    v2 = udiv v0, v1
+    return v2
+}

@@ -87,6 +87,11 @@ pub struct DataRelocEntry {
     pub addend: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TranslationOptions {
+    pub shared_memory_max_pages: Option<usize>,
+}
+
 /// Runtime functions the translator can synthesize directly as wasm bodies (no CLIF
 /// input): the libcall family cg_clif emits calls to. `Memcpy` uses bulk-memory
 /// `memory.copy`, which is overlap-safe, so it serves memmove too.
@@ -172,6 +177,15 @@ pub fn translate_module_multi(
     exports: &[&str],
 ) -> Result<Vec<u8>> {
     module::translate_module(funcs, data, exports)
+}
+
+pub fn translate_module_with_options(
+    funcs: &[NamedClifFunc],
+    data: &[NamedClifData],
+    exports: &[&str],
+    options: TranslationOptions,
+) -> Result<Vec<u8>> {
+    module::translate_module_with_options(funcs, data, exports, options)
 }
 
 /// Full form: `runtime_overrides` marks slice positions whose bodies are synthesized

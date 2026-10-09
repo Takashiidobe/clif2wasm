@@ -1,0 +1,7 @@
+; run: %truncate(65535) == -1
+; run: %truncate(32768) == -32768
+function %truncate(i32) -> i16 {
+block0(v0: i32):
+    v1 = ireduce.i16 v0
+    return v1
+}

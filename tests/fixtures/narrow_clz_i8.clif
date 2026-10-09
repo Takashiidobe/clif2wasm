@@ -1,0 +1,7 @@
+; run: %leading(-1) == 0
+; run: %leading(1) == 7
+function %leading(i8) -> i8 {
+block0(v0: i8):
+    v1 = clz v0
+    return v1
+}

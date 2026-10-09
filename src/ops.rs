@@ -230,9 +230,7 @@ pub fn lower_inst(
 
         // --- Integer & float binary arithmetic / bitwise ---
         //
-        // Narrow ints (i8/i16) live in I32 with a CANONICAL ZERO-EXTENDED representation:
-        // loads use Load8U/16U, iconst masks, and add/sub/mul re-mask their result, so
-        // unsigned compares and uextend are direct; signed operations sign-extend first.
+        // Narrow ints (i8/i16) live in I32 with a canonical zero-extended representation.
         InstructionData::Binary { opcode, args } => {
             let result = dfg.first_result(inst);
             let rty = dfg.value_type(result);
@@ -244,8 +242,22 @@ pub fn lower_inst(
             }
 
             let wty = map_type(rty)?;
-            let a = cx.one(args[0])?;
-            let b = cx.one(args[1])?;
+            let mut a = cx.one(args[0])?;
+            let mut b = cx.one(args[1])?;
+            let narrow = matches!(rty, types::I8 | types::I16);
+            let width = if rty == types::I8 { 8 } else { 16 };
+            if narrow {
+                a = mask_narrow(body, wb, a, rty);
+                if !matches!(opcode, Opcode::Ishl | Opcode::Ushr | Opcode::Sshr) {
+                    b = mask_narrow(body, wb, b, rty);
+                }
+                if matches!(opcode, Opcode::Sdiv | Opcode::Srem | Opcode::Sshr) {
+                    a = sign_extend_narrow(body, wb, a, rty);
+                }
+                if matches!(opcode, Opcode::Sdiv | Opcode::Srem) {
+                    b = sign_extend_narrow(body, wb, b, rty);
+                }
+            }
 
             // Shifts: wasm requires amount type == operand type; CLIF allows a
             // mismatch. Both agree the amount is taken mod bit-width, so a plain
@@ -260,7 +272,7 @@ pub fn lower_inst(
                     && matches!(rty, types::I8 | types::I16)),
                 "narrow-int rotate ({rty}) unimplemented"
             );
-            let b = if is_shift {
+            let mut b = if is_shift {
                 let amt_ty = map_type(cx.vty(args[1]))?;
                 match (wty, amt_ty) {
                     (Type::I32, Type::I64) => {
@@ -274,6 +286,15 @@ pub fn lower_inst(
             } else {
                 b
             };
+            if narrow && is_shift {
+                let mask = body.add_op(
+                    wb,
+                    Operator::I32Const { value: width - 1 },
+                    &[],
+                    &[Type::I32],
+                );
+                b = body.add_op(wb, Operator::I32And, &[b, mask], &[Type::I32]);
+            }
 
             let op = match (opcode, wty) {
                 (Opcode::Iadd, Type::I32) => Operator::I32Add,
@@ -325,9 +346,7 @@ pub fn lower_inst(
             };
             let mut wv = body.add_op(wb, op, &[a, b], &[wty]);
             // Re-canonicalize narrow results whose op can dirty high bits.
-            if matches!(rty, types::I8 | types::I16)
-                && matches!(opcode, Opcode::Iadd | Opcode::Isub | Opcode::Imul)
-            {
+            if narrow {
                 wv = mask_narrow(body, wb, wv, rty);
             }
             cx.bind1(result, wv);
@@ -364,11 +383,17 @@ pub fn lower_inst(
                     | IntCC::SignedGreaterThanOrEqual
             );
             let (a0, b0) = (cx.one(args[0])?, cx.one(args[1])?);
-            let (a0, b0) = if narrow && signed_cc {
-                (
-                    sign_extend_narrow(body, wb, a0, operand_clif_ty),
-                    sign_extend_narrow(body, wb, b0, operand_clif_ty),
-                )
+            let (a0, b0) = if narrow {
+                let a0 = mask_narrow(body, wb, a0, operand_clif_ty);
+                let b0 = mask_narrow(body, wb, b0, operand_clif_ty);
+                if signed_cc {
+                    (
+                        sign_extend_narrow(body, wb, a0, operand_clif_ty),
+                        sign_extend_narrow(body, wb, b0, operand_clif_ty),
+                    )
+                } else {
+                    (a0, b0)
+                }
             } else {
                 (a0, b0)
             };
@@ -695,38 +720,43 @@ pub fn lower_inst(
             cx.bind1(result, addr);
         }
 
-        // --- Atomics: singlethread target -> plain memory ops (fence = nop) ---
         InstructionData::LoadNoOffset {
             opcode: Opcode::AtomicLoad,
             arg,
             ..
         } => {
-            let addr = lower_addr(cx, arg)?;
+            ensure_shared_memory(cx, "atomic_load")?;
             let result = dfg.first_result(inst);
-            let wty = map_type(dfg.value_type(result))?;
-            let memory = mem_arg(cx, 0i32.into())?;
-            let op = match wty {
-                Type::I32 => Operator::I32Load { memory },
-                Type::I64 => Operator::I64Load { memory },
-                other => bail!("atomic_load of {other} unimplemented"),
+            let ty = dfg.value_type(result);
+            let memory = atomic_mem_arg(cx, ty)?;
+            let op = match ty {
+                types::I8 => Operator::I32AtomicLoad8U { memarg: memory },
+                types::I16 => Operator::I32AtomicLoad16U { memarg: memory },
+                types::I32 => Operator::I32AtomicLoad { memarg: memory },
+                types::I64 => Operator::I64AtomicLoad { memarg: memory },
+                other => bail!("atomic_load of {other} is unsupported"),
             };
-            let wv = body.add_op(wb, op, &[addr], &[wty]);
-            cx.bind1(result, wv);
+            let addr = lower_addr(cx, arg)?;
+            let value = body.add_op(wb, op, &[addr], &[map_type(ty)?]);
+            cx.bind1(result, value);
         }
         InstructionData::StoreNoOffset {
             opcode: Opcode::AtomicStore,
             args,
             ..
         } => {
-            // CLIF atomic_store: args are [value, addr].
+            ensure_shared_memory(cx, "atomic_store")?;
+            let value_ty = cx.vty(args[0]);
+            let memory = atomic_mem_arg(cx, value_ty)?;
+            let op = match value_ty {
+                types::I8 => Operator::I32AtomicStore8 { memarg: memory },
+                types::I16 => Operator::I32AtomicStore16 { memarg: memory },
+                types::I32 => Operator::I32AtomicStore { memarg: memory },
+                types::I64 => Operator::I64AtomicStore { memarg: memory },
+                other => bail!("atomic_store of {other} is unsupported"),
+            };
             let value = cx.one(args[0])?;
             let addr = lower_addr(cx, args[1])?;
-            let memory = mem_arg(cx, 0i32.into())?;
-            let op = match map_type(cx.vty(args[0]))? {
-                Type::I32 => Operator::I32Store { memory },
-                Type::I64 => Operator::I64Store { memory },
-                other => bail!("atomic_store of {other} unimplemented"),
-            };
             body.add_op(wb, op, &[addr, value], &[]);
         }
         InstructionData::AtomicRmw {
@@ -736,135 +766,78 @@ pub fn lower_inst(
             ..
         } => {
             use cranelift_codegen::ir::AtomicRmwOp;
-            // args are [addr, operand]; returns the OLD value.
+            ensure_shared_memory(cx, "atomic_rmw")?;
+            let result = dfg.first_result(inst);
+            let ty = dfg.value_type(result);
+            let memory = atomic_mem_arg(cx, ty)?;
+            let narrow = matches!(ty, types::I8 | types::I16);
+            let op = match (ty, rmw_op) {
+                (types::I8, AtomicRmwOp::Add) => Operator::I32AtomicRmw8AddU { memarg: memory },
+                (types::I8, AtomicRmwOp::Sub) => Operator::I32AtomicRmw8SubU { memarg: memory },
+                (types::I8, AtomicRmwOp::And) => Operator::I32AtomicRmw8AndU { memarg: memory },
+                (types::I8, AtomicRmwOp::Or) => Operator::I32AtomicRmw8OrU { memarg: memory },
+                (types::I8, AtomicRmwOp::Xor) => Operator::I32AtomicRmw8XorU { memarg: memory },
+                (types::I8, AtomicRmwOp::Xchg) => Operator::I32AtomicRmw8XchgU { memarg: memory },
+                (types::I16, AtomicRmwOp::Add) => Operator::I32AtomicRmw16AddU { memarg: memory },
+                (types::I16, AtomicRmwOp::Sub) => Operator::I32AtomicRmw16SubU { memarg: memory },
+                (types::I16, AtomicRmwOp::And) => Operator::I32AtomicRmw16AndU { memarg: memory },
+                (types::I16, AtomicRmwOp::Or) => Operator::I32AtomicRmw16OrU { memarg: memory },
+                (types::I16, AtomicRmwOp::Xor) => Operator::I32AtomicRmw16XorU { memarg: memory },
+                (types::I16, AtomicRmwOp::Xchg) => Operator::I32AtomicRmw16XchgU { memarg: memory },
+                (types::I32, AtomicRmwOp::Add) => Operator::I32AtomicRmwAdd { memarg: memory },
+                (types::I32, AtomicRmwOp::Sub) => Operator::I32AtomicRmwSub { memarg: memory },
+                (types::I32, AtomicRmwOp::And) => Operator::I32AtomicRmwAnd { memarg: memory },
+                (types::I32, AtomicRmwOp::Or) => Operator::I32AtomicRmwOr { memarg: memory },
+                (types::I32, AtomicRmwOp::Xor) => Operator::I32AtomicRmwXor { memarg: memory },
+                (types::I32, AtomicRmwOp::Xchg) => Operator::I32AtomicRmwXchg { memarg: memory },
+                (types::I64, AtomicRmwOp::Add) => Operator::I64AtomicRmwAdd { memarg: memory },
+                (types::I64, AtomicRmwOp::Sub) => Operator::I64AtomicRmwSub { memarg: memory },
+                (types::I64, AtomicRmwOp::And) => Operator::I64AtomicRmwAnd { memarg: memory },
+                (types::I64, AtomicRmwOp::Or) => Operator::I64AtomicRmwOr { memarg: memory },
+                (types::I64, AtomicRmwOp::Xor) => Operator::I64AtomicRmwXor { memarg: memory },
+                (types::I64, AtomicRmwOp::Xchg) => Operator::I64AtomicRmwXchg { memarg: memory },
+                (_, other) => {
+                    bail!("atomic_rmw operation {other} on {ty} has no direct wasm atomic opcode")
+                }
+            };
             let addr = lower_addr(cx, args[0])?;
             let operand = cx.one(args[1])?;
-            let result = dfg.first_result(inst);
-            let wty = map_type(dfg.value_type(result))?;
-            let is64 = wty == Type::I64;
-            ensure!(
-                matches!(wty, Type::I32 | Type::I64),
-                "atomic_rmw of {wty} unimplemented"
-            );
-            let memory = mem_arg(cx, 0i32.into())?;
-            let (load_op, store_op) = if is64 {
-                (Operator::I64Load { memory }, Operator::I64Store { memory })
+            let value = body.add_op(wb, op, &[addr, operand], &[map_type(ty)?]);
+            let value = if narrow {
+                mask_narrow(body, wb, value, ty)
             } else {
-                (Operator::I32Load { memory }, Operator::I32Store { memory })
+                value
             };
-            let old = body.add_op(wb, load_op, &[addr], &[wty]);
-            let pick = |a: Operator, b: Operator| if is64 { b } else { a };
-            let new = match rmw_op {
-                AtomicRmwOp::Add => body.add_op(
-                    wb,
-                    pick(Operator::I32Add, Operator::I64Add),
-                    &[old, operand],
-                    &[wty],
-                ),
-                AtomicRmwOp::Sub => body.add_op(
-                    wb,
-                    pick(Operator::I32Sub, Operator::I64Sub),
-                    &[old, operand],
-                    &[wty],
-                ),
-                AtomicRmwOp::And => body.add_op(
-                    wb,
-                    pick(Operator::I32And, Operator::I64And),
-                    &[old, operand],
-                    &[wty],
-                ),
-                AtomicRmwOp::Or => body.add_op(
-                    wb,
-                    pick(Operator::I32Or, Operator::I64Or),
-                    &[old, operand],
-                    &[wty],
-                ),
-                AtomicRmwOp::Xor => body.add_op(
-                    wb,
-                    pick(Operator::I32Xor, Operator::I64Xor),
-                    &[old, operand],
-                    &[wty],
-                ),
-                AtomicRmwOp::Xchg => operand,
-                AtomicRmwOp::Nand => {
-                    let and = body.add_op(
-                        wb,
-                        pick(Operator::I32And, Operator::I64And),
-                        &[old, operand],
-                        &[wty],
-                    );
-                    let ones = if is64 {
-                        body.add_op(wb, Operator::I64Const { value: u64::MAX }, &[], &[wty])
-                    } else {
-                        body.add_op(wb, Operator::I32Const { value: u32::MAX }, &[], &[wty])
-                    };
-                    body.add_op(
-                        wb,
-                        pick(Operator::I32Xor, Operator::I64Xor),
-                        &[and, ones],
-                        &[wty],
-                    )
-                }
-                AtomicRmwOp::Umin | AtomicRmwOp::Umax | AtomicRmwOp::Smin | AtomicRmwOp::Smax => {
-                    let cmp_op = match (rmw_op, is64) {
-                        (AtomicRmwOp::Umin, false) => Operator::I32LtU,
-                        (AtomicRmwOp::Umin, true) => Operator::I64LtU,
-                        (AtomicRmwOp::Umax, false) => Operator::I32GtU,
-                        (AtomicRmwOp::Umax, true) => Operator::I64GtU,
-                        (AtomicRmwOp::Smin, false) => Operator::I32LtS,
-                        (AtomicRmwOp::Smin, true) => Operator::I64LtS,
-                        (AtomicRmwOp::Smax, false) => Operator::I32GtS,
-                        (AtomicRmwOp::Smax, true) => Operator::I64GtS,
-                        _ => unreachable!(),
-                    };
-                    let c = body.add_op(wb, cmp_op, &[old, operand], &[Type::I32]);
-                    body.add_op(wb, Operator::Select, &[old, operand, c], &[wty])
-                }
-            };
-            body.add_op(wb, store_op, &[addr, new], &[]);
-            cx.bind1(result, old);
+            cx.bind1(result, value);
         }
         InstructionData::AtomicCas {
             opcode: Opcode::AtomicCas,
             args,
             ..
         } => {
-            // args are [addr, expected, replacement]; returns the OLD value; stores
-            // replacement iff old == expected. Single-threaded: branchless
-            // load/select/store is exact.
+            ensure_shared_memory(cx, "atomic_cas")?;
+            let result = dfg.first_result(inst);
+            let ty = dfg.value_type(result);
+            let memory = atomic_mem_arg(cx, ty)?;
+            let op = match ty {
+                types::I8 => Operator::I32AtomicRmw8CmpxchgU { memarg: memory },
+                types::I16 => Operator::I32AtomicRmw16CmpxchgU { memarg: memory },
+                types::I32 => Operator::I32AtomicRmwCmpxchg { memarg: memory },
+                types::I64 => Operator::I64AtomicRmwCmpxchg { memarg: memory },
+                other => bail!("atomic_cas of {other} is unsupported"),
+            };
             let addr = lower_addr(cx, args[0])?;
             let expected = cx.one(args[1])?;
             let replacement = cx.one(args[2])?;
-            let result = dfg.first_result(inst);
-            let wty = map_type(dfg.value_type(result))?;
-            let is64 = wty == Type::I64;
-            ensure!(
-                matches!(wty, Type::I32 | Type::I64),
-                "atomic_cas of {wty} unimplemented"
-            );
-            let memory = mem_arg(cx, 0i32.into())?;
-            let (load_op, store_op, eq_op) = if is64 {
-                (
-                    Operator::I64Load { memory },
-                    Operator::I64Store { memory },
-                    Operator::I64Eq,
-                )
-            } else {
-                (
-                    Operator::I32Load { memory },
-                    Operator::I32Store { memory },
-                    Operator::I32Eq,
-                )
-            };
-            let old = body.add_op(wb, load_op, &[addr], &[wty]);
-            let eq = body.add_op(wb, eq_op, &[old, expected], &[Type::I32]);
-            let new = body.add_op(wb, Operator::Select, &[replacement, old, eq], &[wty]);
-            body.add_op(wb, store_op, &[addr, new], &[]);
-            cx.bind1(result, old);
+            let value = body.add_op(wb, op, &[addr, expected, replacement], &[map_type(ty)?]);
+            cx.bind1(result, value);
         }
         InstructionData::NullAry {
             opcode: Opcode::Fence,
-        } => {}
+        } => {
+            ensure_shared_memory(cx, "fence")?;
+            body.add_op(wb, Operator::AtomicFence, &[], &[]);
+        }
 
         // --- Function pointers ---
         InstructionData::FuncAddr {
@@ -988,7 +961,7 @@ fn lower_unary(
                     let n = if signed {
                         sign_extend_narrow(body, wb, v, src_ty)
                     } else {
-                        v
+                        mask_narrow(body, wb, v, src_ty)
                     };
                     if dst_ty == types::I32 {
                         cx.bind1(result, n);
@@ -1584,7 +1557,15 @@ fn bind_call_results(
     let call = body.add_op(wb, op, wargs, &tys);
     match tys.len() {
         0 => {}
-        1 => cx.bind1(results[0], call),
+        1 => {
+            let ty = cx.clif.dfg.value_type(results[0]);
+            let value = if matches!(ty, types::I8 | types::I16) {
+                mask_narrow(body, wb, call, ty)
+            } else {
+                call
+            };
+            cx.bind1(results[0], value);
+        }
         // Multi-value: waffle models the call as one tuple-typed value; each wasm-level
         // result is a PickOutput projection (risk probe: external builders plausibly
         // never exercised this path).
@@ -1600,7 +1581,15 @@ fn bind_call_results(
                     idx += 1;
                 }
                 match w {
-                    1 => cx.bind1(r, picked[0]),
+                    1 => {
+                        let ty = cx.clif.dfg.value_type(r);
+                        let value = if matches!(ty, types::I8 | types::I16) {
+                            mask_narrow(body, wb, picked[0], ty)
+                        } else {
+                            picked[0]
+                        };
+                        cx.bind1(r, value)
+                    }
                     2 => cx.bind2(r, picked[0], picked[1]),
                     _ => bail!("unexpected result width {w}"),
                 }
@@ -1612,7 +1601,7 @@ fn bind_call_results(
 
 /// Re-canonicalize a narrow (i8/i16) value to zero-extended form after an op that
 /// can dirty its high bits.
-fn mask_narrow(
+pub(crate) fn mask_narrow(
     body: &mut FunctionBody,
     wb: waffle::Block,
     v: waffle::Value,
@@ -1660,7 +1649,30 @@ fn mem_arg(cx: &FnCx, offset: ir::immediates::Offset32) -> Result<MemoryArg> {
     Ok(MemoryArg {
         // Byte-alignment hint: always correct, never a trap; tuning comes later.
         align: 0,
-        offset: off as u32,
+        offset: off as u64,
+        memory: cx.m.mem0,
+    })
+}
+
+fn ensure_shared_memory(cx: &FnCx, operation: &str) -> Result<()> {
+    ensure!(
+        cx.m.shared_memory,
+        "atomic operation {operation} requires translation with shared_memory_max_pages enabled"
+    );
+    Ok(())
+}
+
+fn atomic_mem_arg(cx: &FnCx, ty: types::Type) -> Result<MemoryArg> {
+    let align = match ty {
+        types::I8 => 0,
+        types::I16 => 1,
+        types::I32 => 2,
+        types::I64 => 3,
+        other => bail!("atomic access of {other} is unsupported"),
+    };
+    Ok(MemoryArg {
+        align,
+        offset: 0,
         memory: cx.m.mem0,
     })
 }

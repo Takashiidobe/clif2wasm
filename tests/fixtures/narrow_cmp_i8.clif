@@ -1,0 +1,7 @@
+; run: %less(-1, 1) == 1
+; run: %less(127, -1) == 0
+function %less(i8, i8) -> i8 {
+block0(v0: i8, v1: i8):
+    v2 = icmp slt v0, v1
+    return v2
+}

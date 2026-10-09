@@ -36,6 +36,7 @@ pub struct ModCtx<'a> {
     pub callees: &'a [waffle::Func],
     /// The module's single linear memory.
     pub mem0: waffle::Memory,
+    pub shared_memory: bool,
     pub stack_limit: Option<u32>,
     /// The synthesized `__stack_pointer` mutable global.
     pub sp_global: waffle::Global,
@@ -210,6 +211,7 @@ pub fn translate_function(
             .iter()
             .map(|&(_, v)| v)
             .collect();
+        let entry_wb = body.entry;
         let mut wi = 0;
         for &p in clif.dfg.block_params(entry) {
             if clif.dfg.value_type(p) == ir::types::I128 {
@@ -224,7 +226,14 @@ pub fn translate_function(
                     wi < wparams.len(),
                     "entry params shorter than expanded signature"
                 );
-                cx.bind1(p, wparams[wi]);
+                let value = wparams[wi];
+                let ty = clif.dfg.value_type(p);
+                let value = if matches!(ty, ir::types::I8 | ir::types::I16) {
+                    ops::mask_narrow(&mut body, entry_wb, value, ty)
+                } else {
+                    value
+                };
+                cx.bind1(p, value);
                 wi += 1;
             }
         }
@@ -249,7 +258,12 @@ pub fn translate_function(
                 let hi = body.add_blockparam(wb, Type::I64);
                 cx.bind2(p, lo, hi);
             } else {
-                let wv = body.add_blockparam(wb, map_type(ty)?);
+                let param = body.add_blockparam(wb, map_type(ty)?);
+                let wv = if matches!(ty, ir::types::I8 | ir::types::I16) {
+                    ops::mask_narrow(&mut body, wb, param, ty)
+                } else {
+                    param
+                };
                 cx.bind1(p, wv);
             }
         }
@@ -417,8 +431,11 @@ pub fn translate_function(
                             &[],
                         );
                     }
-                    let result_types =
-                        crate::module::signature_data(&clif.dfg.signatures[ext.signature])?.returns;
+                    let result_types = crate::module::signature_parts(
+                        &crate::module::signature_data(&clif.dfg.signatures[ext.signature])?,
+                    )?
+                    .1
+                    .to_vec();
                     let call = body.add_op(
                         wb,
                         Operator::Call {
@@ -457,8 +474,11 @@ pub fn translate_function(
                             &[],
                         );
                     }
-                    let result_types =
-                        crate::module::signature_data(&clif.dfg.signatures[*sig_ref])?.returns;
+                    let result_types = crate::module::signature_parts(
+                        &crate::module::signature_data(&clif.dfg.signatures[*sig_ref])?,
+                    )?
+                    .1
+                    .to_vec();
                     let call = body.add_op(
                         wb,
                         Operator::Call {

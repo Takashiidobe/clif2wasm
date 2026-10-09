@@ -1,0 +1,7 @@
+; run: %shift(-1, 1) == 32767
+; run: %shift(-32768, 1) == 16384
+function %shift(i16, i16) -> i16 {
+block0(v0: i16, v1: i16):
+    v2 = ushr v0, v1
+    return v2
+}

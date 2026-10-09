@@ -1,0 +1,1 @@
+Atomic CLIF operations are lowered, but are not covered by the differential fixtures. The Cranelift interpreter does not implement linear-memory address regions, and Wasmi does not support the WebAssembly threads proposal required to validate shared-memory modules. Keep atomic coverage out of this suite until its reference and Wasm execution paths can both run those fixtures.
