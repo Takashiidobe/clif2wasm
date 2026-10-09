@@ -95,9 +95,15 @@ pub(super) fn lower_symbol_value(
         name, offset, tls, ..
     } = gvd
     else {
-        unsupported!("unimplemented global value form {gvd:?} (only Symbol)");
+        unsupported!(
+            "symbol_value of {global_value} is unsupported: only symbol global values are lowered, not {gvd:?}"
+        );
     };
-    ensure!(!tls, "TLS symbols are out of scope");
+    if *tls {
+        unsupported!(
+            "symbol_value of TLS symbol {global_value} is unsupported: wasm has no thread-local storage model"
+        );
+    }
     let ir::ExternalName::User(r) = name else {
         unsupported!("unsupported data symbol name {name:?}");
     };
@@ -128,6 +134,19 @@ pub(super) fn lower_symbol_value(
     );
     cx.bind1(result, wv);
     Ok(())
+}
+
+pub(super) fn lower_tls_value(cx: &FnCx, inst: ir::Inst) -> Result<()> {
+    let InstructionData::UnaryGlobalValue {
+        opcode: Opcode::TlsValue,
+        global_value,
+    } = cx.clif.dfg.insts[inst]
+    else {
+        unreachable!("lower_tls_value dispatched on a non-matching instruction")
+    };
+    unsupported!(
+        "tls_value of {global_value} is unsupported: wasm has no thread-local storage model, and lowering it to ordinary data would silently share one value between threads"
+    )
 }
 
 pub(super) fn lower_load(

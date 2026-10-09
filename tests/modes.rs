@@ -303,3 +303,99 @@ block0(v0: i32):
     // second(5) = first(5) + 400 = (5 + 30) + 400
     assert!(matches!(results[0], wasmi::Val::I32(435)));
 }
+
+fn translate_error(source: &str) -> String {
+    let mut module = WasmModule::new().unwrap();
+    let id = declare(&mut module, "main", Linkage::Export, source);
+    let slot = module
+        .declare_data("slot", Linkage::Local, true, false)
+        .unwrap();
+    let mut desc = DataDescription::new();
+    desc.define(vec![0; 4].into_boxed_slice());
+    module.define_data(slot, &desc).unwrap();
+    let function = parse_functions(source).unwrap().remove(0);
+    let defined = module.define_function(id, &mut Context::for_function(function));
+    match defined {
+        Err(error) => error.to_string(),
+        Ok(()) => module
+            .finish()
+            .err()
+            .expect("translation should fail")
+            .to_string(),
+    }
+}
+
+#[test]
+fn symbol_value_applies_the_symbol_offset() {
+    let mut module = WasmModule::new().unwrap();
+    let main_src = "function %main(i32) -> i32 {
+    gv0 = symbol colocated u1:0+4
+block0(v0: i32):
+    v1 = symbol_value.i32 gv0
+    v2 = load.i32 v1
+    return v2
+}";
+    let main = declare(&mut module, "main", Linkage::Export, main_src);
+    let table = module
+        .declare_data("table", Linkage::Local, false, false)
+        .unwrap();
+    define(&mut module, main, main_src);
+    let mut desc = DataDescription::new();
+    desc.define([1u32, 77, 3].iter().flat_map(|v| v.to_le_bytes()).collect());
+    desc.set_align(4);
+    module.define_data(table, &desc).unwrap();
+    let bytes = module.finish().unwrap();
+    assert_eq!(run_i32(&bytes, "main", 0), 77);
+}
+
+#[test]
+fn tls_value_is_rejected() {
+    let message = translate_error(
+        "function %main() -> i32 {
+    gv0 = symbol colocated tls u1:0
+block0:
+    v0 = tls_value.i32 gv0
+    return v0
+}",
+    );
+    assert!(message.contains("CLIF2WASM-E2000"), "{message}");
+    assert!(message.contains("tls_value"), "{message}");
+}
+
+#[test]
+fn symbol_value_of_a_tls_symbol_is_rejected() {
+    let message = translate_error(
+        "function %main() -> i32 {
+    gv0 = symbol colocated tls u1:0
+block0:
+    v0 = symbol_value.i32 gv0
+    return v0
+}",
+    );
+    assert!(message.contains("CLIF2WASM-E2000"), "{message}");
+    assert!(message.contains("TLS"), "{message}");
+}
+
+#[test]
+fn non_symbol_global_values_are_rejected() {
+    let message = translate_error(
+        "function %main() -> i32 {
+    gv0 = symbol colocated u1:0
+    gv1 = iadd_imm.i32 gv0, 8
+block0:
+    v0 = symbol_value.i32 gv1
+    return v0
+}",
+    );
+    assert!(message.contains("CLIF2WASM-E2000"), "{message}");
+    assert!(message.contains("only symbol global values"), "{message}");
+}
+
+#[test]
+fn thread_local_data_declarations_are_rejected() {
+    let mut module = WasmModule::new().unwrap();
+    let named = module.declare_data("tls", Linkage::Local, true, true);
+    assert!(named.unwrap_err().to_string().contains("thread-local"));
+    let anonymous = module.declare_anonymous_data(true, true);
+    assert!(anonymous.unwrap_err().to_string().contains("thread-local"));
+}

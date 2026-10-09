@@ -412,7 +412,13 @@ pub(crate) fn translate<'a>(
             continue;
         };
         for (_gv, gvd) in clif.global_values.iter() {
-            let ir::GlobalValueData::Symbol { name, offset, .. } = gvd else {
+            let ir::GlobalValueData::Symbol {
+                name,
+                offset,
+                tls: false,
+                ..
+            } = gvd
+            else {
                 continue;
             };
             let ir::ExternalName::User(r) = name else {

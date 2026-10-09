@@ -213,3 +213,34 @@ block0(v0: i32):
         assert_eq!(value, 77);
     }
 }
+
+#[test]
+fn tls_value_is_rejected_in_object_mode() {
+    let source = "function %main() -> i32 {
+    gv0 = symbol colocated tls u1:0
+block0:
+    v0 = tls_value.i32 gv0
+    return v0
+}";
+    let function = parse_functions(source).unwrap().remove(0);
+    let funcs = [ObjFunc {
+        name: "main",
+        binding: ObjBinding::Global,
+        hidden: false,
+        def: Some(ObjDef::Clif(&function)),
+        sig: function.signature.clone(),
+    }];
+    let data = [ObjData {
+        name: "slot",
+        binding: ObjBinding::Global,
+        hidden: false,
+        def: Some(ObjDataDef {
+            bytes: vec![0; 4],
+            align: 4,
+            relocs: Vec::new(),
+        }),
+    }];
+    let message = translate_object(&funcs, &data).unwrap_err().to_string();
+    assert!(message.contains("CLIF2WASM-E2000"), "{message}");
+    assert!(message.contains("tls_value"), "{message}");
+}

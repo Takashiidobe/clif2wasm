@@ -303,6 +303,10 @@ pub fn lower_inst(
             opcode: Opcode::SymbolValue,
             ..
         } => lower_symbol_value(cx, body, wb, inst)?,
+        InstructionData::UnaryGlobalValue {
+            opcode: Opcode::TlsValue,
+            ..
+        } => lower_tls_value(cx, inst)?,
 
         // --- Integer & float binary arithmetic / bitwise ---
         //

@@ -638,6 +638,7 @@ impl Module for WasmModule {
         writable: bool,
         tls: bool,
     ) -> ModuleResult<DataId> {
+        reject_tls(tls)?;
         let (id, _linkage) = self
             .declarations
             .declare_data(name, linkage, writable, tls)?;
@@ -645,6 +646,7 @@ impl Module for WasmModule {
     }
 
     fn declare_anonymous_data(&mut self, writable: bool, tls: bool) -> ModuleResult<DataId> {
+        reject_tls(tls)?;
         self.declarations.declare_anonymous_data(writable, tls)
     }
 
@@ -701,4 +703,16 @@ impl Module for WasmModule {
         self.data.insert(data_id, data.clone());
         Ok(())
     }
+}
+
+fn reject_tls(tls: bool) -> ModuleResult<()> {
+    if tls {
+        return Err(ModuleError::Backend(
+            std::io::Error::other(
+                "thread-local data is unsupported by the wasm backend: wasm has no thread-local storage model",
+            )
+            .into(),
+        ));
+    }
+    Ok(())
 }
