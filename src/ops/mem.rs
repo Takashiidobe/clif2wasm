@@ -1,0 +1,349 @@
+use crate::error::{Context, Result};
+use crate::{ensure, unsupported};
+use cranelift_codegen::ir::{self, InstructionData, Opcode, types};
+use waffle::{FunctionBody, MemoryArg, Operator, Type};
+
+use super::*;
+use crate::bridge::FnCx;
+use crate::map_type;
+
+/// The pointer-width tripwire: addresses must be CLIF i32. CLIF captured from a
+/// 64-bit target carries i64 addresses; it must fail loudly here, never truncate
+/// (see docs/plans/cranelift-wasm-backend.md §8 on silent 32-bit miscompiles).
+pub(super) fn lower_addr(cx: &FnCx, addr: ir::Value) -> Result<waffle::Value> {
+    let ty = cx.vty(addr);
+    ensure!(
+        ty == types::I32,
+        "address has CLIF type {ty}, expected i32 — was this CLIF built for a 64-bit pointer target?"
+    );
+    cx.one(addr)
+}
+
+pub(super) fn validate_memory_flags(cx: &FnCx, flags: ir::MemFlags, operation: &str) -> Result<()> {
+    let data = cx.clif.dfg.mem_flags[flags];
+    ensure!(
+        data.explicit_endianness() != Some(ir::Endianness::Big),
+        "big-endian {operation} is unsupported; WebAssembly memory is little-endian"
+    );
+    Ok(())
+}
+
+pub(super) fn mem_arg(cx: &FnCx, offset: ir::immediates::Offset32) -> Result<MemoryArg> {
+    let off: i32 = offset.into();
+    mem_arg_at(cx, off)
+}
+
+pub(super) fn mem_arg_at(cx: &FnCx, off: i32) -> Result<MemoryArg> {
+    ensure!(
+        off >= 0,
+        "negative load/store offset {off} is unsupported (wasm offsets are unsigned)"
+    );
+    Ok(MemoryArg {
+        // Byte-alignment hint: always correct, never a trap; tuning comes later.
+        align: 0,
+        offset: off as u64,
+        memory: cx.m.mem0,
+    })
+}
+
+pub(super) fn ensure_shared_memory(cx: &FnCx, operation: &str) -> Result<()> {
+    ensure!(
+        cx.m.shared_memory,
+        "atomic operation {operation} requires translation with shared_memory_max_pages enabled"
+    );
+    Ok(())
+}
+
+pub(super) fn atomic_mem_arg(cx: &FnCx, ty: types::Type) -> Result<MemoryArg> {
+    let align = match ty {
+        types::I8 => 0,
+        types::I16 => 1,
+        types::I32 => 2,
+        types::I64 => 3,
+        other => unsupported!("atomic access of {other} is unsupported"),
+    };
+    Ok(MemoryArg {
+        align,
+        offset: 0,
+        memory: cx.m.mem0,
+    })
+}
+
+pub(super) fn lower_symbol_value(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+) -> Result<()> {
+    let dfg = &cx.clif.dfg;
+    let InstructionData::UnaryGlobalValue {
+        opcode: Opcode::SymbolValue,
+        global_value,
+    } = dfg.insts[inst]
+    else {
+        unreachable!("lower_symbol_value dispatched on a non-matching instruction")
+    };
+    use cranelift_codegen::ir::GlobalValueData;
+    let result = dfg.first_result(inst);
+    ensure!(
+        dfg.value_type(result) == types::I32,
+        "symbol_value result must be i32 (wasm32 pointer), got {} — 64-bit-target CLIF?",
+        dfg.value_type(result)
+    );
+    let gvd = &cx.clif.global_values[global_value];
+    let GlobalValueData::Symbol {
+        name, offset, tls, ..
+    } = gvd
+    else {
+        unsupported!("unimplemented global value form {gvd:?} (only Symbol)");
+    };
+    ensure!(!tls, "TLS symbols are out of scope");
+    let ir::ExternalName::User(r) = name else {
+        unsupported!("unsupported data symbol name {name:?}");
+    };
+    let user = cx
+        .clif
+        .params
+        .user_named_funcs()
+        .get(*r)
+        .context("dangling userextname on data symbol")?;
+    ensure!(
+        user.namespace == 1,
+        "data symbol has namespace {} (expected 1)",
+        user.namespace
+    );
+    let off: i64 = (*offset).into();
+    let marker =
+        cx.m.object_markers
+            .data
+            .get(&(user.index, off))
+            .with_context(|| format!("no marker for data ordinal {} offset {off}", user.index))?;
+    let wv = body.add_op(
+        wb,
+        Operator::GlobalGet {
+            global_index: *marker,
+        },
+        &[],
+        &[Type::I32],
+    );
+    cx.bind1(result, wv);
+    Ok(())
+}
+
+pub(super) fn lower_load(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+) -> Result<()> {
+    let dfg = &cx.clif.dfg;
+    let InstructionData::Load {
+        opcode,
+        arg,
+        flags,
+        offset,
+    } = dfg.insts[inst]
+    else {
+        unreachable!("lower_load dispatched on a non-matching instruction")
+    };
+    validate_memory_flags(cx, flags, "load")?;
+    let addr = lower_addr(cx, arg)?;
+    let result = dfg.first_result(inst);
+    let rty = dfg.value_type(result);
+    if rty.is_vector() && opcode == Opcode::Load {
+        let bits = rty.bits();
+        let values = if bits < 128 {
+            let scalar_ty = if bits <= 32 { Type::I32 } else { Type::I64 };
+            let op = match bits {
+                16 => Operator::I32Load16U {
+                    memory: mem_arg(cx, offset)?,
+                },
+                32 => Operator::I32Load {
+                    memory: mem_arg(cx, offset)?,
+                },
+                64 => Operator::I64Load {
+                    memory: mem_arg(cx, offset)?,
+                },
+                _ => unsupported!("vector load width {bits} is unsupported"),
+            };
+            let scalar = body.add_op(wb, op, &[addr], &[scalar_ty]);
+            let zero = body.add_op(wb, Operator::V128Const { value: 0 }, &[], &[Type::V128]);
+            let insert = replace_lane_op(
+                if bits == 16 {
+                    types::I16
+                } else if bits == 32 {
+                    types::I32
+                } else {
+                    types::I64
+                },
+                0,
+            )?;
+            vec![body.add_op(wb, insert, &[zero, scalar], &[Type::V128])]
+        } else {
+            let chunks = crate::expand_type(rty)?.len();
+            let base_offset: i32 = offset.into();
+            let mut values = Vec::with_capacity(chunks);
+            for i in 0..chunks {
+                let lane_offset = base_offset
+                    .checked_add(
+                        (i as i32)
+                            .checked_mul(16)
+                            .context("vector load offset overflow")?,
+                    )
+                    .context("vector load offset overflow")?;
+                let memory = mem_arg_at(cx, lane_offset)?;
+                values.push(body.add_op(wb, Operator::V128Load { memory }, &[addr], &[Type::V128]));
+            }
+            values
+        };
+        cx.bind_vector(result, normalize_vector(body, wb, rty, values)?);
+        return Ok(());
+    }
+    if rty == types::I128 && opcode == Opcode::Load {
+        let off: i32 = offset.into();
+        ensure!(off >= 0, "negative i128 load offset");
+        let m0 = mem_arg(cx, offset)?;
+        let m8 = mem_arg_at(cx, off.checked_add(8).context("i128 load offset overflow")?)?;
+        let lo = body.add_op(wb, Operator::I64Load { memory: m0 }, &[addr], &[Type::I64]);
+        let hi = body.add_op(wb, Operator::I64Load { memory: m8 }, &[addr], &[Type::I64]);
+        cx.bind2(result, lo, hi);
+        return Ok(());
+    }
+    let wty = if rty.is_vector() {
+        Type::V128
+    } else {
+        map_type(rty)?
+    };
+    let memory = mem_arg(cx, offset)?;
+    let op = match (opcode, rty) {
+        (Opcode::Uload8x8, types::I16X8) => Operator::V128Load8x8U { memory },
+        (Opcode::Sload8x8, types::I16X8) => Operator::V128Load8x8S { memory },
+        (Opcode::Uload16x4, types::I32X4) => Operator::V128Load16x4U { memory },
+        (Opcode::Sload16x4, types::I32X4) => Operator::V128Load16x4S { memory },
+        (Opcode::Uload32x2, types::I64X2) => Operator::V128Load32x2U { memory },
+        (Opcode::Sload32x2, types::I64X2) => Operator::V128Load32x2S { memory },
+        // Narrow plain loads produce the canonical zero-extended form.
+        (Opcode::Load, types::I8) => Operator::I32Load8U { memory },
+        (Opcode::Load, types::I16) => Operator::I32Load16U { memory },
+        (Opcode::Load, types::I32) => Operator::I32Load { memory },
+        (Opcode::Load, types::I64) => Operator::I64Load { memory },
+        (Opcode::Load, types::F32) => Operator::F32Load { memory },
+        (Opcode::Load, types::F64) => Operator::F64Load { memory },
+        // Explicit widening loads.
+        (Opcode::Uload8, types::I32) => Operator::I32Load8U { memory },
+        (Opcode::Sload8, types::I32) => Operator::I32Load8S { memory },
+        (Opcode::Uload16, types::I32) => Operator::I32Load16U { memory },
+        (Opcode::Sload16, types::I32) => Operator::I32Load16S { memory },
+        (Opcode::Uload8, types::I64) => Operator::I64Load8U { memory },
+        (Opcode::Sload8, types::I64) => Operator::I64Load8S { memory },
+        (Opcode::Uload16, types::I64) => Operator::I64Load16U { memory },
+        (Opcode::Sload16, types::I64) => Operator::I64Load16S { memory },
+        (Opcode::Uload32, types::I64) => Operator::I64Load32U { memory },
+        (Opcode::Sload32, types::I64) => Operator::I64Load32S { memory },
+        (op, ty) => unsupported!("unimplemented load `{op}` of type {ty}"),
+    };
+    let wv = body.add_op(wb, op, &[addr], &[wty]);
+    if rty.is_vector() {
+        cx.bind_vector(result, vec![wv]);
+    } else {
+        cx.bind1(result, wv);
+    }
+    Ok(())
+}
+
+pub(super) fn lower_store(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+) -> Result<()> {
+    let dfg = &cx.clif.dfg;
+    let InstructionData::Store {
+        opcode,
+        args,
+        flags,
+        offset,
+    } = dfg.insts[inst]
+    else {
+        unreachable!("lower_store dispatched on a non-matching instruction")
+    };
+    validate_memory_flags(cx, flags, "store")?;
+    if cx.vty(args[0]).is_vector() && opcode == Opcode::Store {
+        let ty = cx.vty(args[0]);
+        let addr = lower_addr(cx, args[1])?;
+        let vector = cx.vector(args[0])?;
+        let bits = ty.bits();
+        if bits < 128 {
+            let extract = extract_lane_op(
+                if bits == 16 {
+                    types::I16
+                } else if bits == 32 {
+                    types::I32
+                } else {
+                    types::I64
+                },
+                0,
+            )?;
+            let scalar_ty = if bits <= 32 { Type::I32 } else { Type::I64 };
+            let scalar = body.add_op(wb, extract, &[vector[0]], &[scalar_ty]);
+            let memory = mem_arg(cx, offset)?;
+            let op = match bits {
+                16 => Operator::I32Store16 { memory },
+                32 => Operator::I32Store { memory },
+                64 => Operator::I64Store { memory },
+                _ => unsupported!("vector store width {bits} is unsupported"),
+            };
+            body.add_op(wb, op, &[addr, scalar], &[]);
+        } else {
+            let base_offset: i32 = offset.into();
+            for (i, &value) in vector.iter().enumerate() {
+                let lane_offset = base_offset
+                    .checked_add(
+                        (i as i32)
+                            .checked_mul(16)
+                            .context("vector store offset overflow")?,
+                    )
+                    .context("vector store offset overflow")?;
+                let memory = mem_arg_at(cx, lane_offset)?;
+                body.add_op(wb, Operator::V128Store { memory }, &[addr, value], &[]);
+            }
+        }
+        return Ok(());
+    }
+    // CLIF: store v, p, offset — args are [value, addr]; wasm order is [addr, value].
+    if cx.vty(args[0]) == types::I128 && opcode == Opcode::Store {
+        let (lo, hi) = cx.pair(args[0])?;
+        let addr = lower_addr(cx, args[1])?;
+        let off: i32 = offset.into();
+        ensure!(off >= 0, "negative i128 store offset");
+        let m0 = mem_arg(cx, offset)?;
+        let m8 = mem_arg_at(
+            cx,
+            off.checked_add(8).context("i128 store offset overflow")?,
+        )?;
+        body.add_op(wb, Operator::I64Store { memory: m0 }, &[addr, lo], &[]);
+        body.add_op(wb, Operator::I64Store { memory: m8 }, &[addr, hi], &[]);
+        return Ok(());
+    }
+    let value = cx.one(args[0])?;
+    let addr = lower_addr(cx, args[1])?;
+    let memory = mem_arg(cx, offset)?;
+    let vty = cx.vty(args[0]);
+    let op = match (opcode, vty) {
+        (Opcode::Store, types::I8) => Operator::I32Store8 { memory },
+        (Opcode::Store, types::I16) => Operator::I32Store16 { memory },
+        (Opcode::Store, types::I32) => Operator::I32Store { memory },
+        (Opcode::Store, types::I64) => Operator::I64Store { memory },
+        (Opcode::Store, types::F32) => Operator::F32Store { memory },
+        (Opcode::Store, types::F64) => Operator::F64Store { memory },
+        // Truncating stores of wider values.
+        (Opcode::Istore8, types::I32) => Operator::I32Store8 { memory },
+        (Opcode::Istore16, types::I32) => Operator::I32Store16 { memory },
+        (Opcode::Istore8, types::I64) => Operator::I64Store8 { memory },
+        (Opcode::Istore16, types::I64) => Operator::I64Store16 { memory },
+        (Opcode::Istore32, types::I64) => Operator::I64Store32 { memory },
+        (op, ty) => unsupported!("unimplemented store `{op}` of type {ty}"),
+    };
+    body.add_op(wb, op, &[addr, value], &[]);
+    Ok(())
+}
