@@ -580,7 +580,8 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "waffle"
-version = "0.3.2"
+version = "0.3.3"
+source = "git+https://github.com/Takashiidobe/waffle?rev=bb4ed2c0b5cf1bea85884e9106a65d297e2d53f7#bb4ed2c0b5cf1bea85884e9106a65d297e2d53f7"
 dependencies = [
  "anyhow",
  "fxhash",
