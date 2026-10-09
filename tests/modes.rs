@@ -317,11 +317,7 @@ fn translate_error(source: &str) -> String {
     let defined = module.define_function(id, &mut Context::for_function(function));
     match defined {
         Err(error) => error.to_string(),
-        Ok(()) => module
-            .finish()
-            .err()
-            .expect("translation should fail")
-            .to_string(),
+        Ok(()) => module.finish().unwrap_err().to_string(),
     }
 }
 
