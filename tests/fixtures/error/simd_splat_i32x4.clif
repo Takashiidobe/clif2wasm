@@ -1,0 +1,7 @@
+; entry: %splat
+; error: unsupported CLIF type i32x4
+function %splat(i32) -> i32x4 {
+block0(v0: i32):
+    v1 = splat.i32x4 v0
+    return v1
+}

@@ -71,8 +71,9 @@ fn run_fixture(path: &Path) {
         .lines()
         .find_map(|line| line.strip_prefix("; error:").map(str::trim))
     {
-        let error = clif2wasm::translate_module_multi(&named, &[], &["test"])
-            .expect_err("error fixture unexpectedly translated");
+        let error = clif2wasm::translate_module_multi(&named, &[], &["test"]).expect_err(
+            "error fixture now translates; move it to tests/fixtures and add run expectations",
+        );
         let diagnostic = format!("{error:#}");
         assert!(
             diagnostic.contains(expected),
