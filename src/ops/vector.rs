@@ -148,6 +148,9 @@ pub(super) fn lower_vector_binary(
     ) {
         return lower_vector_shift(cx, body, wb, result, ty, opcode, args);
     }
+    if matches!(opcode, Opcode::Snarrow | Opcode::Unarrow | Opcode::Uunarrow) {
+        return lower_vector_narrow(cx, body, wb, result, ty, opcode, args);
+    }
     if opcode == Opcode::Fcopysign {
         return lower_vector_copysign(cx, body, wb, result, ty, args);
     }
@@ -838,6 +841,167 @@ pub(super) fn lower_x86_cvtt2dq(
         &[min_lanes, saturated, invalid],
         &[Type::V128],
     );
+    cx.bind_vector(result, vec![value]);
+    Ok(())
+}
+
+fn narrow_operator(opcode: Opcode, lane: ir::Type) -> Result<Operator> {
+    let unsigned_result = !matches!(opcode, Opcode::Snarrow);
+    Ok(match (lane, unsigned_result) {
+        (types::I16, false) => Operator::I8x16NarrowI16x8S,
+        (types::I16, true) => Operator::I8x16NarrowI16x8U,
+        (types::I32, false) => Operator::I16x8NarrowI32x4S,
+        (types::I32, true) => Operator::I16x8NarrowI32x4U,
+        _ => unsupported!("vector {opcode} from lane type {lane} is unsupported"),
+    })
+}
+
+fn byte_shuffle(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    lanes: [u8; 16],
+    a: waffle::Value,
+    b: waffle::Value,
+) -> waffle::Value {
+    body.add_op(wb, Operator::I8x16Shuffle { lanes }, &[a, b], &[Type::V128])
+}
+
+pub(super) fn lower_vector_narrow(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    result: ir::Value,
+    ty: ir::Type,
+    opcode: Opcode,
+    args: [ir::Value; 2],
+) -> Result<()> {
+    let src = cx.vty(args[0]);
+    let lane = src.lane_type();
+    ensure!(src.bits() <= 128, "{opcode} on {src} is unsupported");
+    let narrow = narrow_operator(opcode, lane)?;
+    let mut xs = cx.vector(args[0])?;
+    let mut ys = cx.vector(args[1])?;
+    if opcode == Opcode::Uunarrow {
+        let (min, limit) = if lane == types::I16 {
+            (
+                Operator::I16x8MinU,
+                0x00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ffu128,
+            )
+        } else {
+            (
+                Operator::I32x4MinU,
+                0x0000_ffff_0000_ffff_0000_ffff_0000_ffffu128,
+            )
+        };
+        let limit = body.add_op(wb, Operator::V128Const { value: limit }, &[], &[Type::V128]);
+        for chunk in xs.iter_mut().chain(ys.iter_mut()) {
+            *chunk = body.add_op(wb, min, &[*chunk, limit], &[Type::V128]);
+        }
+    }
+    let values = if src.bits() == 128 {
+        vec![body.add_op(wb, narrow, &[xs[0], ys[0]], &[Type::V128])]
+    } else {
+        let joined = body.add_op(wb, narrow, &[xs[0], ys[0]], &[Type::V128]);
+        let half = (src.bits() / 16) as u8;
+        let mut lanes = [0u8; 16];
+        for i in 0..2 * half {
+            lanes[i as usize] = if i < half { i } else { 8 + i - half };
+        }
+        vec![byte_shuffle(body, wb, lanes, joined, joined)]
+    };
+    cx.bind_vector(result, normalize_vector(body, wb, ty, values)?);
+    Ok(())
+}
+
+fn widen_operators(opcode: Opcode, lane: ir::Type) -> Result<(Operator, Operator)> {
+    let signed = matches!(opcode, Opcode::SwidenLow | Opcode::SwidenHigh);
+    Ok(match (lane, signed) {
+        (types::I8, true) => (
+            Operator::I16x8ExtendLowI8x16S,
+            Operator::I16x8ExtendHighI8x16S,
+        ),
+        (types::I8, false) => (
+            Operator::I16x8ExtendLowI8x16U,
+            Operator::I16x8ExtendHighI8x16U,
+        ),
+        (types::I16, true) => (
+            Operator::I32x4ExtendLowI16x8S,
+            Operator::I32x4ExtendHighI16x8S,
+        ),
+        (types::I16, false) => (
+            Operator::I32x4ExtendLowI16x8U,
+            Operator::I32x4ExtendHighI16x8U,
+        ),
+        (types::I32, true) => (
+            Operator::I64x2ExtendLowI32x4S,
+            Operator::I64x2ExtendHighI32x4S,
+        ),
+        (types::I32, false) => (
+            Operator::I64x2ExtendLowI32x4U,
+            Operator::I64x2ExtendHighI32x4U,
+        ),
+        _ => unsupported!("vector {opcode} from lane type {lane} is unsupported"),
+    })
+}
+
+pub(super) fn lower_vector_widen(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+    opcode: Opcode,
+    arg: ir::Value,
+) -> Result<()> {
+    let result = cx.clif.dfg.first_result(inst);
+    let ty = cx.vty(result);
+    let src = cx.vty(arg);
+    ensure!(
+        src.is_vector(),
+        "{opcode} requires a fixed vector, got {src}"
+    );
+    let (extend_low, extend_high) = widen_operators(opcode, src.lane_type())?;
+    let high = matches!(opcode, Opcode::SwidenHigh | Opcode::UwidenHigh);
+    let chunks = cx.vector(arg)?;
+    let values = if src.bits() == 128 {
+        let op = if high { extend_high } else { extend_low };
+        vec![body.add_op(wb, op, &[chunks[0]], &[Type::V128])]
+    } else {
+        let mut chunk = chunks[0];
+        if high {
+            let shift = (src.bits() / 16) as u8;
+            let mut lanes = [0u8; 16];
+            for (i, lane) in lanes.iter_mut().enumerate() {
+                *lane = (i as u8 + shift).min(15);
+            }
+            chunk = byte_shuffle(body, wb, lanes, chunk, chunk);
+        }
+        vec![body.add_op(wb, extend_low, &[chunk], &[Type::V128])]
+    };
+    cx.bind_vector(result, normalize_vector(body, wb, ty, values)?);
+    Ok(())
+}
+
+pub(super) fn lower_vector_float_resize(
+    cx: &mut FnCx,
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    inst: ir::Inst,
+    opcode: Opcode,
+    arg: ir::Value,
+) -> Result<()> {
+    let result = cx.clif.dfg.first_result(inst);
+    let (from, to, op) = if opcode == Opcode::Fvdemote {
+        (types::F64X2, types::F32X4, Operator::F32x4DemoteF64x2Zero)
+    } else {
+        (types::F32X4, types::F64X2, Operator::F64x2PromoteLowF32x4)
+    };
+    ensure!(
+        cx.vty(arg) == from && cx.vty(result) == to,
+        "{opcode} must convert {from} to {to}, got {} to {}",
+        cx.vty(arg),
+        cx.vty(result)
+    );
+    let value = body.add_op(wb, op, &cx.vector(arg)?, &[Type::V128]);
     cx.bind_vector(result, vec![value]);
     Ok(())
 }

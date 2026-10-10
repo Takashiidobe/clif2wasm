@@ -53,8 +53,8 @@ fneg lowered
 fpromote lowered
 fsub lowered
 func_addr lowered
-fvdemote unsupported aaw.33
-fvpromote_low unsupported aaw.33
+fvdemote lowered
+fvpromote_low lowered
 get_exception_handler_address unsupported not observable in wasm (docs/machine-state.md)
 get_frame_pointer unsupported no frame-pointer chain (docs/machine-state.md)
 get_pinned_reg unsupported no slot for a pinned-register global (docs/machine-state.md)
@@ -107,7 +107,7 @@ smax lowered
 smin lowered
 smul_overflow unsupported aaw.16
 smulhi lowered
-snarrow unsupported aaw.33
+snarrow lowered
 splat lowered
 sqmul_round_sat lowered
 sqrt lowered
@@ -119,8 +119,8 @@ ssub_sat lowered
 stack_addr lowered
 stack_switch unsupported needs stack-switching operators (aaw.32)
 store lowered
-swiden_high unsupported aaw.33
-swiden_low unsupported aaw.33
+swiden_high lowered
+swiden_low lowered
 swizzle lowered
 symbol_value lowered
 tls_value unsupported thread-local storage boundary (docs/global-values.md)
@@ -146,15 +146,15 @@ umax lowered
 umin lowered
 umul_overflow unsupported aaw.16
 umulhi lowered
-unarrow unsupported aaw.33
+unarrow lowered
 urem lowered
 ushr lowered
 usub_overflow lowered
 usub_overflow_bin lowered
 usub_sat lowered
-uunarrow unsupported aaw.33
-uwiden_high unsupported aaw.33
-uwiden_low unsupported aaw.33
+uunarrow lowered
+uwiden_high lowered
+uwiden_low lowered
 vall_true lowered
 vany_true lowered
 vconst lowered

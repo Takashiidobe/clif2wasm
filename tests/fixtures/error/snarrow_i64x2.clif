@@ -1,0 +1,7 @@
+; error-span: snarrow
+; error: from lane type i64 is unsupported
+function %narrow(i64x2, i64x2) -> i32x4 {
+block0(v0: i64x2, v1: i64x2):
+    v2 = snarrow v0, v1
+    return v2
+}

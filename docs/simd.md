@@ -22,7 +22,12 @@ i8x16.
 - Integer and float comparisons
 - `vany_true`, `vall_true`, `vhigh_bits`
 - Conversions: float-to-int saturating, int-to-float, `fpromote`, `fdemote`
-  (Wasm shapes only)
+  (Wasm shapes only), `fvpromote_low`, `fvdemote`
+- Narrowing and widening: `snarrow`, `unarrow`, `uunarrow`, `swiden_low/high`,
+  `uwiden_low/high` for 128-bit and smaller vectors. `uunarrow` clamps with an
+  unsigned min, then uses the unsigned-saturating narrow. Sub-128-bit vectors
+  go through the same operator and a byte shuffle to close the gap between
+  halves. Narrowing from i64 lanes is unsupported: Wasm has no `i32x4.narrow_i64x2`.
 
 ## Unsupported
 

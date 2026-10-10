@@ -1000,6 +1000,12 @@ pub(super) fn lower_unary(
             let wv = body.add_op(wb, op, &[v], &[wty]);
             cx.bind1(result, wv);
         }
+        Opcode::SwidenLow | Opcode::SwidenHigh | Opcode::UwidenLow | Opcode::UwidenHigh => {
+            lower_vector_widen(cx, body, wb, inst, opcode, arg)?;
+        }
+        Opcode::Fvdemote | Opcode::FvpromoteLow => {
+            lower_vector_float_resize(cx, body, wb, inst, opcode, arg)?;
+        }
         Opcode::Fpromote => {
             let result = dfg.first_result(inst);
             let dst_ty = dfg.value_type(result);
