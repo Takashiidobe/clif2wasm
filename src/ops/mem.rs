@@ -243,7 +243,7 @@ pub(super) fn lower_load(
         (Opcode::Sload32x2, types::I64X2) => Operator::V128Load32x2S { memory },
         // Narrow plain loads produce the canonical zero-extended form.
         (Opcode::Load, types::I8) => Operator::I32Load8U { memory },
-        (Opcode::Load, types::I16) => Operator::I32Load16U { memory },
+        (Opcode::Load, types::I16 | types::F16) => Operator::I32Load16U { memory },
         (Opcode::Load, types::I32) => Operator::I32Load { memory },
         (Opcode::Load, types::I64) => Operator::I64Load { memory },
         (Opcode::Load, types::F32) => Operator::F32Load { memory },
@@ -350,7 +350,7 @@ pub(super) fn lower_store(
     let vty = cx.vty(args[0]);
     let op = match (opcode, vty) {
         (Opcode::Store, types::I8) => Operator::I32Store8 { memory },
-        (Opcode::Store, types::I16) => Operator::I32Store16 { memory },
+        (Opcode::Store, types::I16 | types::F16) => Operator::I32Store16 { memory },
         (Opcode::Store, types::I32) => Operator::I32Store { memory },
         (Opcode::Store, types::I64) => Operator::I64Store { memory },
         (Opcode::Store, types::F32) => Operator::F32Store { memory },

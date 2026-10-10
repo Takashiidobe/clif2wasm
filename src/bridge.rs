@@ -228,7 +228,7 @@ pub fn translate_function(
                     "entry params shorter than expanded signature"
                 );
                 let value = wparams[wi];
-                let value = if matches!(ty, ir::types::I8 | ir::types::I16) {
+                let value = if matches!(ty, ir::types::I8 | ir::types::I16 | ir::types::F16) {
                     ops::mask_narrow(&mut body, entry_wb, value, ty)
                 } else {
                     value
@@ -267,7 +267,7 @@ pub fn translate_function(
                 cx.bind_vector(p, values);
             } else {
                 let param = body.add_blockparam(wb, map_type(ty)?);
-                let wv = if matches!(ty, ir::types::I8 | ir::types::I16) {
+                let wv = if matches!(ty, ir::types::I8 | ir::types::I16 | ir::types::F16) {
                     ops::mask_narrow(&mut body, wb, param, ty)
                 } else {
                     param

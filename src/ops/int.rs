@@ -814,6 +814,9 @@ pub(super) fn lower_unary(
                 cx.bind_vector(result, normalize_vector(body, wb, result_ty, values)?);
                 return Ok(());
             }
+            if result_ty == types::F16 {
+                return super::f16::lower_unary(cx, body, wb, result, opcode, arg);
+            }
             let wty = map_type(result_ty)?;
             let v = cx.one(arg)?;
             let op = match (opcode, wty) {
@@ -866,7 +869,10 @@ pub(super) fn lower_unary(
                 unsupported!("scalar saturating conversion to vector type {dst} is unsupported");
             }
             let f64src = cx.vty(arg) == types::F64;
-            let v = cx.one(arg)?;
+            let mut v = cx.one(arg)?;
+            if src_ty == types::F16 {
+                v = super::f16::to_f32(body, wb, v);
+            }
             if dst == types::I128 {
                 let value = lower_float_to_i128(body, wb, v, !f64src, signed)?;
                 cx.bind2(result, value.0, value.1);
@@ -927,7 +933,10 @@ pub(super) fn lower_unary(
             );
             let signed = opcode == Opcode::FcvtToSint;
             let f64src = cx.vty(arg) == types::F64;
-            let v = cx.one(arg)?;
+            let mut v = cx.one(arg)?;
+            if cx.vty(arg) == types::F16 {
+                v = super::f16::to_f32(body, wb, v);
+            }
             let (op, wty) = match (dst, f64src, signed) {
                 (types::I32, false, true) => (Operator::I32TruncF32S, Type::I32),
                 (types::I32, false, false) => (Operator::I32TruncF32U, Type::I32),
@@ -962,6 +971,29 @@ pub(super) fn lower_unary(
             }
             if dst_ty.is_vector() {
                 unsupported!("scalar conversion to vector type {dst_ty} is unsupported");
+            }
+            if dst_ty == types::F16 {
+                ensure!(
+                    src_ty != types::I128,
+                    "fcvt from {src_ty} to f16 is unsupported: rounding through f32 or f64 would round twice"
+                );
+                ensure!(
+                    src_ty != types::I64,
+                    "fcvt from i64 to f16 is unsupported: rounding through f64 would round twice"
+                );
+                let mut v = cx.one(arg)?;
+                if signed && matches!(src_ty, types::I8 | types::I16) {
+                    v = sign_extend_narrow(body, wb, v, src_ty);
+                }
+                let op = if signed {
+                    Operator::F64ConvertI32S
+                } else {
+                    Operator::F64ConvertI32U
+                };
+                let wide = body.add_op(wb, op, &[v], &[Type::F64]);
+                let value = super::f16::from_f64(body, wb, wide);
+                cx.bind1(result, value);
+                return Ok(());
             }
             if src_ty == types::I128 {
                 ensure!(
@@ -1024,7 +1056,14 @@ pub(super) fn lower_unary(
                 cx.bind_vector(result, vec![value]);
                 return Ok(());
             }
-            let v = cx.one(arg)?;
+            let mut v = cx.one(arg)?;
+            if cx.vty(arg) == types::F16 {
+                v = super::f16::to_f32(body, wb, v);
+                if dst_ty == types::F32 {
+                    cx.bind1(result, v);
+                    return Ok(());
+                }
+            }
             let wv = body.add_op(wb, Operator::F64PromoteF32, &[v], &[Type::F64]);
             cx.bind1(result, wv);
         }
@@ -1047,7 +1086,15 @@ pub(super) fn lower_unary(
                 return Ok(());
             }
             let v = cx.one(arg)?;
-            let wv = body.add_op(wb, Operator::F32DemoteF64, &[v], &[Type::F32]);
+            let wv = if dst_ty == types::F16 {
+                if cx.vty(arg) == types::F32 {
+                    super::f16::from_f32(body, wb, v)
+                } else {
+                    super::f16::from_f64(body, wb, v)
+                }
+            } else {
+                body.add_op(wb, Operator::F32DemoteF64, &[v], &[Type::F32])
+            };
             cx.bind1(result, wv);
         }
 
@@ -1188,6 +1235,10 @@ pub(super) fn lower_binary(
     if rty.is_vector() {
         lower_vector_binary(cx, body, wb, result, opcode, args)?;
         return Ok(());
+    }
+
+    if rty == types::F16 {
+        return super::f16::lower_binary(cx, body, wb, result, opcode, args);
     }
 
     if is_overflow_opcode(opcode) && rty != types::I128 {

@@ -46,7 +46,7 @@ pub(crate) fn emit_call(
         at += w;
         groups.push(if ty.is_vector() {
             normalize_vector(body, wb, ty, chunk)?
-        } else if matches!(ty, types::I8 | types::I16) {
+        } else if matches!(ty, types::I8 | types::I16 | types::F16) {
             vec![mask_narrow(body, wb, chunk[0], ty)]
         } else {
             chunk

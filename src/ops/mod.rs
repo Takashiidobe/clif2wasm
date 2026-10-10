@@ -18,6 +18,7 @@ use crate::map_type;
 mod atomic;
 mod call;
 mod cmp;
+mod f16;
 mod i128;
 mod int;
 mod mem;
@@ -134,6 +135,20 @@ pub fn lower_inst(
                 other => unsupported!("iconst of unsupported type {other}"),
             };
             let wv = body.add_op(wb, op, &[], &[wty]);
+            cx.bind1(dfg.first_result(inst), wv);
+        }
+        InstructionData::UnaryIeee16 {
+            opcode: Opcode::F16const,
+            imm,
+        } => {
+            let wv = body.add_op(
+                wb,
+                Operator::I32Const {
+                    value: u32::from(imm.bits()),
+                },
+                &[],
+                &[Type::I32],
+            );
             cx.bind1(dfg.first_result(inst), wv);
         }
         InstructionData::UnaryIeee32 {
@@ -311,6 +326,7 @@ pub fn lower_inst(
                     body.add_op(wb, Operator::F64ReinterpretI64, &[v], &[Type::F64])
                 }
                 (s, d) if s == d => v,
+                (types::F16, types::I16) | (types::I16, types::F16) => v,
                 (s, d) => unsupported!("bitcast {s} -> {d} unimplemented"),
             };
             cx.bind1(result, wv);

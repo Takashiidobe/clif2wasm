@@ -1,0 +1,6 @@
+; error: fcvt from i64 to f16 is unsupported
+function %f16_from_i64(i64) -> f16 {
+block0(v0: i64):
+    v1 = fcvt_from_sint.f16 v0
+    return v1
+}

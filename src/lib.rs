@@ -105,6 +105,7 @@ impl RuntimeFn {
 
 /// CLIF value type -> wasm value type, for types that map to a SINGLE wasm value.
 ///
+/// f16 is soft: its 16 bits live zero-extended in an I32, like i16.
 /// i8/i16 fold to I32 — the minimum unavoidable narrow-int handling: `icmp` produces i8,
 /// so brif/select conditions are i8-typed. Invariant (documented, not checked): such
 /// values are only ever 0/1 or used where high bits cannot matter.
@@ -114,7 +115,7 @@ impl RuntimeFn {
 pub fn map_type(ty: ir::Type) -> ClifResult<waffle::Type> {
     use cranelift_codegen::ir::types;
     Ok(match ty {
-        types::I8 | types::I16 | types::I32 => waffle::Type::I32,
+        types::I8 | types::I16 | types::I32 | types::F16 => waffle::Type::I32,
         types::I64 => waffle::Type::I64,
         types::F32 => waffle::Type::F32,
         types::F64 => waffle::Type::F64,

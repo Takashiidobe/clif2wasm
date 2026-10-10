@@ -373,6 +373,7 @@ fn to_wasm_args(value: &DataValue) -> Vec<Val> {
             Val::I64(*value as u64 as i64),
             Val::I64((*value >> 64) as i64),
         ],
+        DataValue::F16(value) => vec![Val::I32(i32::from(value.bits()))],
         DataValue::F32(value) => vec![Val::from(value.as_f32())],
         DataValue::F64(value) => vec![Val::from(value.as_f64())],
         DataValue::V128(value) => vec![Val::V128(wasmi::V128::from(u128::from_le_bytes(*value)))],
@@ -391,7 +392,7 @@ fn to_wasm_args(value: &DataValue) -> Vec<Val> {
 
 fn wasm_result_types(ty: Type) -> Vec<Val> {
     match ty {
-        types::I8 | types::I16 | types::I32 => vec![Val::I32(0)],
+        types::I8 | types::I16 | types::I32 | types::F16 => vec![Val::I32(0)],
         types::I64 => vec![Val::I64(0)],
         types::I128 => vec![Val::I64(0), Val::I64(0)],
         types::F32 => vec![Val::from(0.0f32)],
@@ -411,6 +412,12 @@ fn from_wasm_result(ty: Type, values: &[Val]) -> (DataValue, usize) {
             let value = *low as u64 as u128 | ((*high as u64 as u128) << 64);
             (DataValue::I128(value as i128), 2)
         }
+        (types::F16, [Val::I32(value), ..]) => (
+            DataValue::F16(cranelift_codegen::ir::immediates::Ieee16::with_bits(
+                *value as u16,
+            )),
+            1,
+        ),
         (types::F32, [Val::F32(value), ..]) => (DataValue::F32(value.to_float().into()), 1),
         (types::F64, [Val::F64(value), ..]) => (DataValue::F64(value.to_float().into()), 1),
         (ty, [Val::V128(value), ..]) if ty.is_vector() && ty.bits() <= 128 => (

@@ -1,0 +1,6 @@
+; error: fma on f16 is unsupported
+function %f16_fma(f16, f16, f16) -> f16 {
+block0(v0: f16, v1: f16, v2: f16):
+    v3 = fma v0, v1, v2
+    return v3
+}

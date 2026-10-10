@@ -27,8 +27,8 @@ debugtrap erased no-op; no debugger observes it (docs/machine-state.md)
 dynamic_stack_addr unsupported dynamic vectors are unsupported (docs/simd.md)
 extract_vector unsupported dynamic vector type required (docs/simd.md)
 extractlane lowered
-f128const unsupported f128 type unsupported (aaw.29)
-f16const unsupported f16 type unsupported (aaw.29)
+f128const unsupported f128 is a documented boundary; see docs/f16.md
+f16const lowered 16 bits in an i32; see docs/f16.md
 f32const lowered
 f64const lowered
 fabs lowered

@@ -1,0 +1,5 @@
+; error: unsupported CLIF type f128
+function %f128(f128) -> f128 {
+block0(v0: f128):
+    return v0
+}

@@ -230,8 +230,12 @@ pub(super) fn lower_fcmp(
         return Ok(());
     }
     let is64 = map_type(cx.vty(args[0]))? == Type::F64;
-    let a = cx.one(args[0])?;
-    let b = cx.one(args[1])?;
+    let mut a = cx.one(args[0])?;
+    let mut b = cx.one(args[1])?;
+    if operand_ty == types::F16 {
+        a = super::f16::to_f32(body, wb, a);
+        b = super::f16::to_f32(body, wb, b);
+    }
     // Direct wasm comparisons (all "ordered": false on NaN except Ne).
     let direct = |c: FloatCC| -> Option<Operator> {
         Some(match (c, is64) {
