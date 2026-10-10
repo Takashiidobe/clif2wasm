@@ -6,22 +6,20 @@
 //! needs a thin cg_clif driver fork) turns the collected CLIF + data into a wasm module
 //! via the existing translator.
 //!
-//! `isa()` returns a **Pulley32** TargetIsa — the only 32-bit-pointer ISA in cranelift
-//! 0.133 — so `pointer_type() == I32` and cg_clif's `pointer_ty(tcx) == isa.pointer_type`
-//! assertion holds for a wasm32 rustc target with no cg_clif core changes. Nothing ever
-//! calls `ctx.compile()`; the ISA is a pointer-width oracle only.
+//! The x64 ISA satisfies Cranelift's Module trait; target_config() supplies Wasm's I32
+//! pointers and SystemV calling convention. This backend stores CLIF without compiling it.
 
 use std::collections::BTreeMap;
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir;
-use cranelift_codegen::isa::{self, OwnedTargetIsa, TargetIsa};
+use cranelift_codegen::isa::{self, CallConv, OwnedTargetIsa, TargetFrontendConfig, TargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_module::{
     DataDescription, DataId, FuncId, Init, Linkage, Module, ModuleDeclarations, ModuleError,
     ModuleReloc, ModuleResult,
 };
-use target_lexicon::Triple;
+use target_lexicon::{PointerWidth, Triple};
 
 use crate::error::{Context, Error, Result};
 use crate::object::{ObjBinding, ObjData, ObjDataDef, ObjDef, ObjFunc};
@@ -29,6 +27,7 @@ use crate::{bail, unsupported};
 
 pub struct WasmModule {
     isa: OwnedTargetIsa,
+    target_config: TargetFrontendConfig,
     data_addresses: Vec<u32>,
     initialized_data: usize,
     declarations: ModuleDeclarations,
@@ -74,6 +73,7 @@ impl Clone for WasmModule {
         }
         Self {
             isa: self.isa.clone(),
+            target_config: self.target_config,
             declarations,
             data_addresses: self.data_addresses.clone(),
             initialized_data: self.initialized_data,
@@ -92,15 +92,21 @@ impl WasmModule {
         fb.set("opt_level", "none")
             .map_err(|e| Error::general(e.to_string()))?;
         let flags = settings::Flags::new(fb);
-        let triple: Triple = "pulley32-unknown-unknown"
+        let triple: Triple = "x86_64-unknown-unknown"
             .parse::<Triple>()
             .map_err(|e| Error::general(e.to_string()))?;
         let isa = isa::lookup(triple)
-            .context("looking up Pulley32 ISA")?
+            .context("looking up x64 ISA")?
             .finish(flags)
-            .context("finishing Pulley32 ISA")?;
+            .context("finishing x64 ISA")?;
+        let target_config = TargetFrontendConfig {
+            default_call_conv: CallConv::SystemV,
+            pointer_width: PointerWidth::U32,
+            page_size_align_log2: 16,
+        };
         Ok(WasmModule {
             isa,
+            target_config,
             data_addresses: vec![],
             initialized_data: 0,
             declarations: ModuleDeclarations::default(),
@@ -600,6 +606,29 @@ fn build_trap_body(f: &mut ir::Function) {
 impl Module for WasmModule {
     fn isa(&self) -> &dyn TargetIsa {
         &*self.isa
+    }
+
+    fn target_config(&self) -> TargetFrontendConfig {
+        self.target_config
+    }
+
+    fn make_context(&self) -> cranelift_codegen::Context {
+        let mut context = cranelift_codegen::Context::new();
+        context.func.signature.call_conv = self.target_config.default_call_conv;
+        context
+    }
+
+    fn clear_context(&self, context: &mut cranelift_codegen::Context) {
+        context.clear();
+        context.func.signature.call_conv = self.target_config.default_call_conv;
+    }
+
+    fn make_signature(&self) -> ir::Signature {
+        ir::Signature::new(self.target_config.default_call_conv)
+    }
+
+    fn clear_signature(&self, signature: &mut ir::Signature) {
+        signature.clear(self.target_config.default_call_conv);
     }
 
     fn declarations(&self) -> &ModuleDeclarations {

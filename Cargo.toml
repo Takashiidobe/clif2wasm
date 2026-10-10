@@ -9,7 +9,7 @@ test = false
 doctest = false
 
 [dependencies]
-cranelift-codegen = { version = "0.136.0", default-features = false, features = ["std", "pulley"] }
+cranelift-codegen = { version = "0.136.0", default-features = false, features = ["std", "x86"] }
 cranelift-frontend = "0.136.0"
 cranelift-module = "0.136.0"
 target-lexicon = "0.13"

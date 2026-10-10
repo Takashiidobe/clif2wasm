@@ -8,6 +8,22 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module as _};
 use cranelift_reader::parse_functions;
 use wasmi::{Engine, Linker, Module, Store};
 
+#[test]
+fn module_frontend_config_uses_wasm_pointer_width() {
+    let module = WasmModule::new().unwrap();
+    let config = module.target_config();
+    assert_eq!(config.pointer_type(), cranelift_codegen::ir::types::I32);
+    assert_eq!(
+        config.default_call_conv,
+        cranelift_codegen::isa::CallConv::SystemV
+    );
+    assert_eq!(
+        module.make_context().func.signature.call_conv,
+        config.default_call_conv
+    );
+    assert_eq!(module.make_signature().call_conv, config.default_call_conv);
+}
+
 fn declare(module: &mut WasmModule, name: &str, linkage: Linkage, source: &str) -> FuncId {
     let function = parse_functions(source).unwrap().remove(0);
     module

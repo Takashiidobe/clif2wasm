@@ -6,4 +6,5 @@
 - `debugtrap` is a no-op: no debugger exists to observe it.
 - `sequence_point` is erased. Its debug tags have nowhere to go in the output, and the barrier it provides already holds because waffle never reorders side-effecting operations.
 - `get_stack_pointer` reads the shadow-stack global, so inside a function with stack slots it equals the frame base. It must produce a 32-bit pointer.
+- `WasmModule::target_config()` is the frontend authority for pointer width and call convention. Its required `Module::isa()` is x64-backed and must not be used to infer Wasm pointer width or compile machine code.
 - Unsupported, with a specific error: `get_pinned_reg`/`set_pinned_reg` (the relocatable form has no slot for another global), `get_frame_pointer` (no frame-pointer chain), `get_return_address` and `get_exception_handler_address` (not observable in wasm).
