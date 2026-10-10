@@ -19,15 +19,6 @@ pub(super) fn lower_addr(cx: &FnCx, addr: ir::Value) -> Result<waffle::Value> {
     cx.one(addr)
 }
 
-pub(super) fn validate_memory_flags(cx: &FnCx, flags: ir::MemFlags, operation: &str) -> Result<()> {
-    let data = cx.clif.dfg.mem_flags[flags];
-    ensure!(
-        data.explicit_endianness() != Some(ir::Endianness::Big),
-        "big-endian {operation} is unsupported; WebAssembly memory is little-endian"
-    );
-    Ok(())
-}
-
 pub(super) fn mem_arg(cx: &FnCx, offset: ir::immediates::Offset32) -> Result<MemoryArg> {
     let off: i32 = offset.into();
     mem_arg_at(cx, off)
@@ -165,11 +156,13 @@ pub(super) fn lower_load(
     else {
         unreachable!("lower_load dispatched on a non-matching instruction")
     };
-    validate_memory_flags(cx, flags, "load")?;
+    let big_endian = cx.clif.dfg.mem_flags[flags].explicit_endianness() == Some(ir::Endianness::Big);
     let addr = lower_addr(cx, arg)?;
     let result = dfg.first_result(inst);
     let rty = dfg.value_type(result);
+    ensure!(!big_endian || !rty.is_vector(), "big-endian vector load is unsupported");
     if rty.is_vector() && opcode == Opcode::Load {
+        ensure!(!big_endian, "big-endian vector load is unsupported");
         let bits = rty.bits();
         let values = if bits < 128 {
             let scalar_ty = if bits <= 32 { Type::I32 } else { Type::I64 };
@@ -225,7 +218,11 @@ pub(super) fn lower_load(
         let m8 = mem_arg_at(cx, off.checked_add(8).context("i128 load offset overflow")?)?;
         let lo = body.add_op(wb, Operator::I64Load { memory: m0 }, &[addr], &[Type::I64]);
         let hi = body.add_op(wb, Operator::I64Load { memory: m8 }, &[addr], &[Type::I64]);
-        cx.bind2(result, lo, hi);
+        if big_endian {
+            cx.bind2(result, crate::ops::int::bswap64(body, wb, hi), crate::ops::int::bswap64(body, wb, lo));
+        } else {
+            cx.bind2(result, lo, hi);
+        }
         return Ok(());
     }
     let wty = if rty.is_vector() {
@@ -250,18 +247,77 @@ pub(super) fn lower_load(
         (Opcode::Load, types::F64) => Operator::F64Load { memory },
         // Explicit widening loads.
         (Opcode::Uload8, types::I32) => Operator::I32Load8U { memory },
+        (Opcode::Sload8, types::I32) if big_endian => Operator::I32Load8U { memory },
         (Opcode::Sload8, types::I32) => Operator::I32Load8S { memory },
         (Opcode::Uload16, types::I32) => Operator::I32Load16U { memory },
+        (Opcode::Sload16, types::I32) if big_endian => Operator::I32Load16U { memory },
         (Opcode::Sload16, types::I32) => Operator::I32Load16S { memory },
         (Opcode::Uload8, types::I64) => Operator::I64Load8U { memory },
+        (Opcode::Sload8, types::I64) if big_endian => Operator::I64Load8U { memory },
         (Opcode::Sload8, types::I64) => Operator::I64Load8S { memory },
         (Opcode::Uload16, types::I64) => Operator::I64Load16U { memory },
+        (Opcode::Sload16, types::I64) if big_endian => Operator::I64Load16U { memory },
         (Opcode::Sload16, types::I64) => Operator::I64Load16S { memory },
         (Opcode::Uload32, types::I64) => Operator::I64Load32U { memory },
+        (Opcode::Sload32, types::I64) if big_endian => Operator::I64Load32U { memory },
         (Opcode::Sload32, types::I64) => Operator::I64Load32S { memory },
         (op, ty) => unsupported!("unimplemented load `{op}` of type {ty}"),
     };
+    ensure!(!big_endian || !rty.is_vector(), "big-endian vector load is unsupported");
     let wv = body.add_op(wb, op, &[addr], &[wty]);
+    let wv = if big_endian {
+        match (opcode, rty) {
+            (Opcode::Load, types::I16 | types::F16) | (Opcode::Uload16, types::I32 | types::I64) | (Opcode::Sload16, types::I32 | types::I64) => {
+                let swapped = crate::ops::int::bswap32(body, wb, wv);
+                let shift = body.add_op(wb, Operator::I32Const { value: 16 }, &[], &[Type::I32]);
+                let narrow = body.add_op(wb, Operator::I32ShrU, &[swapped, shift], &[Type::I32]);
+                let narrow = if opcode == Opcode::Sload16 {
+                    let shift = body.add_op(wb, Operator::I32Const { value: 16 }, &[], &[Type::I32]);
+                    let left = body.add_op(wb, Operator::I32Shl, &[narrow, shift], &[Type::I32]);
+                    let shift = body.add_op(wb, Operator::I32Const { value: 16 }, &[], &[Type::I32]);
+                    body.add_op(wb, Operator::I32ShrS, &[left, shift], &[Type::I32])
+                } else { narrow };
+                if rty == types::I64 {
+                    body.add_op(wb, if opcode == Opcode::Sload16 { Operator::I64ExtendI32S } else { Operator::I64ExtendI32U }, &[narrow], &[Type::I64])
+                } else { narrow }
+            }
+            (Opcode::Load, types::I32) => crate::ops::int::bswap32(body, wb, wv),
+            (Opcode::Uload8, types::I64) => wv,
+            (Opcode::Sload8, types::I64) => {
+                let low = body.add_op(wb, Operator::I32WrapI64, &[wv], &[Type::I32]);
+                let shift = body.add_op(wb, Operator::I32Const { value: 24 }, &[], &[Type::I32]);
+                let left = body.add_op(wb, Operator::I32Shl, &[low, shift], &[Type::I32]);
+                let shift = body.add_op(wb, Operator::I32Const { value: 24 }, &[], &[Type::I32]);
+                let signed = body.add_op(wb, Operator::I32ShrS, &[left, shift], &[Type::I32]);
+                body.add_op(wb, Operator::I64ExtendI32S, &[signed], &[Type::I64])
+            }
+            (Opcode::Load, types::I64)
+            => crate::ops::int::bswap64(body, wb, wv),
+            (Opcode::Uload32, types::I64) | (Opcode::Sload32, types::I64) => {
+                let low = body.add_op(wb, Operator::I32WrapI64, &[wv], &[Type::I32]);
+                let swapped = crate::ops::int::bswap32(body, wb, low);
+                body.add_op(wb, if opcode == Opcode::Sload32 { Operator::I64ExtendI32S } else { Operator::I64ExtendI32U }, &[swapped], &[Type::I64])
+            }
+            (Opcode::Load, types::I8) | (Opcode::Uload8, types::I32) => wv,
+            (Opcode::Sload8, types::I32) => {
+                let shift = body.add_op(wb, Operator::I32Const { value: 24 }, &[], &[Type::I32]);
+                let left = body.add_op(wb, Operator::I32Shl, &[wv, shift], &[Type::I32]);
+                let shift = body.add_op(wb, Operator::I32Const { value: 24 }, &[], &[Type::I32]);
+                body.add_op(wb, Operator::I32ShrS, &[left, shift], &[Type::I32])
+            }
+            (Opcode::Load, types::F32) => {
+                let bits = body.add_op(wb, Operator::I32ReinterpretF32, &[wv], &[Type::I32]);
+                let bits = crate::ops::int::bswap32(body, wb, bits);
+                body.add_op(wb, Operator::F32ReinterpretI32, &[bits], &[Type::F32])
+            }
+            (Opcode::Load, types::F64) => {
+                let bits = body.add_op(wb, Operator::I64ReinterpretF64, &[wv], &[Type::I64]);
+                let bits = crate::ops::int::bswap64(body, wb, bits);
+                body.add_op(wb, Operator::F64ReinterpretI64, &[bits], &[Type::F64])
+            }
+            _ => unsupported!("big-endian load `{opcode}` of type {rty} is unsupported"),
+        }
+    } else { wv };
     if rty.is_vector() {
         cx.bind_vector(result, vec![wv]);
     } else {
@@ -286,8 +342,10 @@ pub(super) fn lower_store(
     else {
         unreachable!("lower_store dispatched on a non-matching instruction")
     };
-    validate_memory_flags(cx, flags, "store")?;
+    let big_endian = cx.clif.dfg.mem_flags[flags].explicit_endianness() == Some(ir::Endianness::Big);
+    ensure!(!big_endian || !cx.vty(args[0]).is_vector(), "big-endian vector store is unsupported");
     if cx.vty(args[0]).is_vector() && opcode == Opcode::Store {
+        ensure!(!big_endian, "big-endian vector store is unsupported");
         let ty = cx.vty(args[0]);
         let addr = lower_addr(cx, args[1])?;
         let vector = cx.vector(args[0])?;
@@ -340,14 +398,41 @@ pub(super) fn lower_store(
             cx,
             off.checked_add(8).context("i128 store offset overflow")?,
         )?;
-        body.add_op(wb, Operator::I64Store { memory: m0 }, &[addr, lo], &[]);
-        body.add_op(wb, Operator::I64Store { memory: m8 }, &[addr, hi], &[]);
+        if big_endian {
+            let lo_swapped = crate::ops::int::bswap64(body, wb, lo);
+            let hi_swapped = crate::ops::int::bswap64(body, wb, hi);
+            body.add_op(wb, Operator::I64Store { memory: m0 }, &[addr, hi_swapped], &[]);
+            body.add_op(wb, Operator::I64Store { memory: m8 }, &[addr, lo_swapped], &[]);
+        } else {
+            body.add_op(wb, Operator::I64Store { memory: m0 }, &[addr, lo], &[]);
+            body.add_op(wb, Operator::I64Store { memory: m8 }, &[addr, hi], &[]);
+        }
         return Ok(());
     }
     let value = cx.one(args[0])?;
     let addr = lower_addr(cx, args[1])?;
     let memory = mem_arg(cx, offset)?;
     let vty = cx.vty(args[0]);
+    let value = if big_endian { match (opcode, vty) {
+        (Opcode::Store, types::I8) | (Opcode::Istore8, types::I32 | types::I64) => value,
+        (Opcode::Store, types::I16 | types::F16) | (Opcode::Istore16, types::I32 | types::I64) => {
+            let bits = if vty == types::I64 { body.add_op(wb, Operator::I32WrapI64, &[value], &[Type::I32]) } else { value };
+            let swapped = crate::ops::int::bswap32(body, wb, bits);
+            let shift = body.add_op(wb, Operator::I32Const { value: 16 }, &[], &[Type::I32]);
+            let swapped = body.add_op(wb, Operator::I32ShrU, &[swapped, shift], &[Type::I32]);
+            if vty == types::I64 { body.add_op(wb, Operator::I64ExtendI32U, &[swapped], &[Type::I64]) } else { swapped }
+        }
+        (Opcode::Istore32, types::I64) => {
+            let bits = body.add_op(wb, Operator::I32WrapI64, &[value], &[Type::I32]);
+            let swapped = crate::ops::int::bswap32(body, wb, bits);
+            body.add_op(wb, Operator::I64ExtendI32U, &[swapped], &[Type::I64])
+        }
+        (_, types::I32) => crate::ops::int::bswap32(body, wb, value),
+        (_, types::I64) => crate::ops::int::bswap64(body, wb, value),
+        (Opcode::Store, types::F32) => { let bits = body.add_op(wb, Operator::I32ReinterpretF32, &[value], &[Type::I32]); let bits = crate::ops::int::bswap32(body, wb, bits); body.add_op(wb, Operator::F32ReinterpretI32, &[bits], &[Type::F32]) },
+        (Opcode::Store, types::F64) => { let bits = body.add_op(wb, Operator::I64ReinterpretF64, &[value], &[Type::I64]); let bits = crate::ops::int::bswap64(body, wb, bits); body.add_op(wb, Operator::F64ReinterpretI64, &[bits], &[Type::F64]) },
+        _ => value,
+    }} else { value };
     let op = match (opcode, vty) {
         (Opcode::Store, types::I8) => Operator::I32Store8 { memory },
         (Opcode::Store, types::I16 | types::F16) => Operator::I32Store16 { memory },
