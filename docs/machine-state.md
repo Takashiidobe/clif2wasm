@@ -1,7 +1,8 @@
 # Traps and machine-state intrinsics
 
 - `trap` is `unreachable`. `trapz`/`trapnz` split the block (bridge.rs) into a trap block and a resume block on a `CondBr`; later instructions of the CLIF block continue in the resume block, so incoming branches still target the head.
-- Trap codes are not reported to the host (clif2wasm-aaw.26).
+- Trap codes: with `TranslationOptions::report_traps`, every CLIF trap site (`trap`, `trapz`, `trapnz`, `uadd_overflow_trap`, the shadow-stack overflow check, and traps inside synthesized runtime helpers such as the i128 divide-by-zero) first calls the import `env.__clif2wasm_trap(code: i32)`, then runs `unreachable`. `code` is the raw Cranelift `TrapCode` byte: 1..=250 are `user(n)`, 251 `stack_overflow`, 252 `integer_overflow`, 253 `heap_out_of_bounds`, 254 `integer_division_by_zero`, 255 `bad_conversion_to_integer`. The host decides what to do with the code; the wasm trap still follows. The import is added only when the option is on, so default modules need no imports; an object leaves it undefined for the linker. An import (not a global or memory cell) was chosen because the relocatable form has no spare global and a data cell would need a symbol every object agrees on.
+- Wasm-native traps (integer divide, float-to-int conversion, out-of-bounds memory) are not CLIF trap sites and do not call the import; the engine's own trap kind already identifies them.
 - `debugtrap` is a no-op: no debugger exists to observe it.
 - `sequence_point` is erased. Its debug tags have nowhere to go in the output, and the barrier it provides already holds because waffle never reorders side-effecting operations.
 - `get_stack_pointer` reads the shadow-stack global, so inside a function with stack slots it equals the frame base. It must produce a 32-bit pointer.

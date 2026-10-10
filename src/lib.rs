@@ -40,7 +40,12 @@ pub struct DataRelocEntry {
 pub struct TranslationOptions {
     pub shared_memory_max_pages: Option<usize>,
     pub lenient: bool,
+    /// Call the imported `env.__clif2wasm_trap(code: i32)` before every CLIF trap's
+    /// `unreachable`. See `docs/traps.md`.
+    pub report_traps: bool,
 }
+
+pub const TRAP_IMPORT: &str = "__clif2wasm_trap";
 
 /// Runtime functions the translator can synthesize directly as wasm bodies (no CLIF
 /// input): the libcall family cg_clif emits calls to. `Memcpy` uses bulk-memory

@@ -385,6 +385,7 @@ impl WasmModule {
                 shared_memory: self.translation_options.shared_memory_max_pages.is_some(),
                 lenient,
                 stack_limit: true,
+                report_traps: self.translation_options.report_traps,
             },
         )?;
         crate::link::link(
@@ -402,7 +403,7 @@ impl WasmModule {
     /// the symbol table. No stub/import/lenient policy — resolution is the
     /// linker's job.
     pub fn finish_object(self) -> Result<Vec<u8>> {
-        use crate::object::{ObjBinding, ObjData, ObjDataDef, ObjFunc, translate_object};
+        use crate::object::{ObjBinding, ObjData, ObjDataDef, ObjFunc, translate_object_with};
 
         fn binding_of(linkage: Linkage) -> ObjBinding {
             match linkage {
@@ -560,7 +561,7 @@ impl WasmModule {
             });
         }
 
-        translate_object(&fns, &data)
+        translate_object_with(&fns, &data, self.translation_options.report_traps)
     }
 }
 

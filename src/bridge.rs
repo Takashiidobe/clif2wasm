@@ -33,6 +33,8 @@ pub enum WVal {
 
 /// Module-level context every function translation needs.
 pub struct ModCtx<'a> {
+    /// Imported `__clif2wasm_trap(code)`, when trap reporting is on.
+    pub trap_import: Option<waffle::Func>,
     /// waffle Func index for each input function, by ordinal (call resolution).
     pub callees: &'a [waffle::Func],
     /// Fixture-style `ExternalName::TestCase` callees, by function name.
@@ -313,9 +315,8 @@ pub fn translate_function(
             );
             let minimum = body.add_op(wb, Operator::I32Add, &[limit, frame], &[Type::I32]);
             let overflow = body.add_op(wb, Operator::I32LtU, &[sp_old, minimum], &[Type::I32]);
-            let trap = body.add_block();
+            let trap = trap_block(&mut body, m.trap_import, ir::TrapCode::STACK_OVERFLOW);
             let resume = body.add_block();
-            body.set_terminator(trap, Terminator::Unreachable);
             body.set_terminator(
                 wb,
                 Terminator::CondBr {
@@ -354,15 +355,14 @@ pub fn translate_function(
         let mut wb = bmap[&block];
         for inst in clif.layout.block_insts(block) {
             match &clif.dfg.insts[inst] {
-                InstructionData::IntAddTrap { .. } => {
+                InstructionData::IntAddTrap { code, .. } => {
                     let instruction = clif.dfg.display_inst(inst).to_string();
                     let function = clif.name.to_string();
                     let overflow = ops::lower_add_trap_value(&mut cx, &mut body, wb, inst)
                         .with_context(|| format!("lowering `{instruction}`"))
                         .map_err(|error| error.at_instruction(&function, &instruction))?;
-                    let trap = body.add_block();
+                    let trap = trap_block(&mut body, cx.m.trap_import, *code);
                     let resume = body.add_block();
-                    body.set_terminator(trap, Terminator::Unreachable);
                     body.set_terminator(
                         wb,
                         Terminator::CondBr {
@@ -379,11 +379,12 @@ pub fn translate_function(
                     );
                     wb = resume;
                 }
-                InstructionData::CondTrap { opcode, arg, .. } => {
+                InstructionData::CondTrap {
+                    opcode, arg, code, ..
+                } => {
                     let cond = ops::coerce_cond(&cx, &mut body, wb, *arg)?;
-                    let trap = body.add_block();
+                    let trap = trap_block(&mut body, cx.m.trap_import, *code);
                     let resume = body.add_block();
-                    body.set_terminator(trap, Terminator::Unreachable);
                     let (on_true, on_false) = match opcode {
                         ir::Opcode::Trapnz => (trap, resume),
                         _ => (resume, trap),
@@ -516,7 +517,8 @@ pub fn translate_function(
                         .map_err(|error| error.at_instruction(&function, &instruction))?;
                     body.set_terminator(wb, Terminator::Br { target });
                 }
-                InstructionData::Trap { .. } => {
+                InstructionData::Trap { code, .. } => {
+                    report_trap(&mut body, wb, cx.m.trap_import, *code);
                     body.set_terminator(wb, Terminator::Unreachable);
                 }
                 _ => {
@@ -538,6 +540,37 @@ pub fn translate_function(
     }
 
     Ok(body)
+}
+
+fn report_trap(
+    body: &mut FunctionBody,
+    wb: waffle::Block,
+    trap_import: Option<waffle::Func>,
+    code: ir::TrapCode,
+) {
+    let Some(function_index) = trap_import else {
+        return;
+    };
+    let code = body.add_op(
+        wb,
+        Operator::I32Const {
+            value: u32::from(code.as_raw().get()),
+        },
+        &[],
+        &[Type::I32],
+    );
+    body.add_op(wb, Operator::Call { function_index }, &[code], &[]);
+}
+
+fn trap_block(
+    body: &mut FunctionBody,
+    trap_import: Option<waffle::Func>,
+    code: ir::TrapCode,
+) -> waffle::Block {
+    let trap = body.add_block();
+    report_trap(body, trap, trap_import, code);
+    body.set_terminator(trap, Terminator::Unreachable);
+    trap
 }
 
 /// Assign frame offsets to every sized stack slot; returns the (16-aligned) frame size

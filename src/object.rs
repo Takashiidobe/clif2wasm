@@ -145,10 +145,21 @@ fn binding_flags(binding: ObjBinding, hidden: bool) -> u32 {
 
 /// Translate CLIF functions + data into a relocatable wasm object.
 pub fn translate_object(funcs: &[ObjFunc], data: &[ObjData]) -> Result<Vec<u8>> {
+    translate_object_with(funcs, data, false)
+}
+
+pub fn translate_object_with(
+    funcs: &[ObjFunc],
+    data: &[ObjData],
+    report_traps: bool,
+) -> Result<Vec<u8>> {
     write_object(&crate::relocatable::translate(
         funcs,
         data,
-        TranslateOptions::default(),
+        TranslateOptions {
+            report_traps,
+            ..TranslateOptions::default()
+        },
     )?)
 }
 

@@ -147,6 +147,8 @@ pub(crate) struct TranslateOptions {
     pub lenient: bool,
     /// Emit a shadow-stack overflow check in prologues.
     pub stack_limit: bool,
+    /// Import `crate::TRAP_IMPORT` and call it before each trap.
+    pub report_traps: bool,
 }
 
 pub(crate) struct Libcall {
@@ -311,7 +313,19 @@ pub(crate) fn translate<'a>(
     data: &'a [ObjData<'a>],
     opts: TranslateOptions,
 ) -> Result<Relocatable<'a>> {
-    let funcs_owned = with_fma_helpers(input_funcs);
+    let mut funcs_owned = with_fma_helpers(input_funcs);
+    if opts.report_traps && !funcs_owned.iter().any(|f| f.name == crate::TRAP_IMPORT) {
+        let mut sig = ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+        sig.params
+            .push(ir::AbiParam::new(cranelift_codegen::ir::types::I32));
+        funcs_owned.push(ObjFunc {
+            name: crate::TRAP_IMPORT,
+            binding: ObjBinding::Global,
+            hidden: false,
+            def: None,
+            sig,
+        });
+    }
     let funcs = &funcs_owned[..];
     let mut module = waffle::Module::empty();
 
@@ -551,7 +565,16 @@ pub(crate) fn translate<'a>(
         }
     }
 
+    let trap_import = if opts.report_traps {
+        funcs
+            .iter()
+            .position(|f| f.name == crate::TRAP_IMPORT)
+            .map(|k| wfuncs[k])
+    } else {
+        None
+    };
     let mctx = ModCtx {
+        trap_import,
         helpers: &helpers,
         callees: &wfuncs,
         testcase_callees: &testcase_callees,
