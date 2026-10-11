@@ -3,6 +3,7 @@
 //! CLIF i128 operations are lowered to pairs of wasm i64 values. Arithmetic that
 //! spans both halves is synthesized with carry, borrow, or quotient-bit logic.
 
+use crate::waffle as waffle;
 use cranelift_codegen::ir::condcodes::IntCC;
 use waffle::{FunctionBody, Operator, Type, Value};
 

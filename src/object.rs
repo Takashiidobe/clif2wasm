@@ -7,6 +7,7 @@
 //! custom section carries the symbol table. We own every byte, so reloc offsets fall
 //! out of the byte stream.
 
+use crate::waffle as waffle;
 use std::collections::HashMap;
 
 use crate::error::Result;

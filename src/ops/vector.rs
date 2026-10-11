@@ -1,3 +1,4 @@
+use crate::waffle as waffle;
 use crate::error::Result;
 use crate::{ensure, unsupported};
 use cranelift_codegen::ir::{self, Opcode, condcodes::FloatCC, condcodes::IntCC, types};

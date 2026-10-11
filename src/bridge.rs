@@ -11,6 +11,7 @@
 //! `__stack_pointer = sp_old` before every return. `stack_addr` lowers to
 //! `sp_new + slot_offset` (the standard LLVM-wasm approach; plan §8).
 
+use crate::waffle as waffle;
 use std::collections::HashMap;
 
 use crate::error::{Context, Result};

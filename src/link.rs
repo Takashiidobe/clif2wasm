@@ -5,6 +5,7 @@
 //! slot a function gets (ordinal + 1, slot 0 stays null), whether memory, table and the
 //! stack pointer are defined or imported, and which libcalls get synthesized bodies.
 
+use crate::waffle as waffle;
 use std::borrow::Cow;
 
 use waffle::wasm_encoder::{

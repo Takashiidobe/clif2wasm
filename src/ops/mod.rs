@@ -6,6 +6,7 @@
 //! the starter set fails with a clear "unimplemented opcode" error — the gap list is a
 //! prototype deliverable.
 
+use crate::waffle as waffle;
 use crate::error::Result;
 use crate::{bail, ensure, unsupported};
 use cranelift_codegen::ir::{self, InstructionData, Opcode, types};

@@ -1,5 +1,6 @@
 //! Signature lowering and synthesized runtime bodies shared by translation and linking.
 
+use crate::waffle as waffle;
 use std::collections::HashMap;
 
 use crate::error::Result;

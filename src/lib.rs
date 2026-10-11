@@ -17,6 +17,7 @@ pub mod ops;
 mod relocatable;
 pub mod runtime_fma;
 pub mod runtime_i128;
+pub mod waffle;
 
 use crate::error::{Error, ErrorCode, Result as ClifResult};
 use cranelift_codegen::ir;

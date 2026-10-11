@@ -14,6 +14,7 @@
 //! memory 0, global 0 = stack pointer, table 0, function imports first — because
 //! compiled bodies carry raw entity indices as immediates.
 
+use crate::waffle as waffle;
 use std::collections::HashMap;
 
 use crate::bridge::{self, ModCtx};

@@ -1,8 +1,13 @@
 [package]
 name = "clif2wasm"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
-publish = false
+description = "Translate Cranelift IR to WebAssembly"
+license = "Apache-2.0 WITH LLVM-exception"
+repository = "https://github.com/Takashiidobe/clif2wasm"
+keywords = ["cranelift", "wasm", "webassembly"]
+categories = ["wasm", "compilers"]
+include = ["/src/**", "/README.md", "/LICENSE"]
 
 [lib]
 test = false
@@ -13,8 +18,17 @@ cranelift-codegen = { version = "0.136.0", default-features = false, features = 
 cranelift-frontend = "0.136.0"
 cranelift-module = "0.136.0"
 target-lexicon = "0.13"
-waffle = { git = "https://github.com/Takashiidobe/waffle", rev = "bb4ed2c0b5cf1bea85884e9106a65d297e2d53f7" }
 wasmparser = "0.261"
+anyhow = "1.0"
+fxhash = "0.2"
+log = "0.4"
+smallvec = "1.13"
+wasm-encoder = { version = "0.248", default-features = false }
+wasmparser_248 = { package = "wasmparser", version = "0.248", default-features = false, features = ["std", "validate", "simd"] }
+rayon = { version = "1.10", optional = true }
+addr2line = { version = "0.21", optional = true }
+libfuzzer-sys = { version = "0.4.7", optional = true }
+wasm-smith = { version = "0.248", optional = true }
 
 thiserror = "2"
 miette = "7"
@@ -27,3 +41,9 @@ wasmi = { version = "2.0.0", features = ["simd"] }
 
 [lints.clippy]
 result_large_err = "allow"
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+dwarf = ["dep:addr2line"]
+fuzzing = ["dep:libfuzzer-sys", "dep:wasm-smith"]
